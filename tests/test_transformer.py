@@ -9,7 +9,8 @@ from tests.utils import get_tinystories_config
 @pytest.fixture(scope="module")
 def tinystories_model() -> SAETransformer:
     tlens_model = load_tlens_model(
-        tlens_model_name="roneneldan/TinyStories-1M", tlens_model_path=None
+        tlens_model_name="roneneldan/TinyStories-1M", tlens_model_path=None,
+            tlens_model_dtype=None
     )
     sae_positions = ["blocks.2.hook_resid_pre"]
     config = get_tinystories_config({"saes": {"sae_positions": sae_positions}})

@@ -1,10 +1,20 @@
 """
 Defines a generic MLP.
 """
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+
+
+SAE_Type = Literal["Vanilla", "BatchTopK"]
+
+# TODO factory method returning BaseAutoEncoder
+# TODO modify return signature of forward() method in BaseAutoEncoder and children
+# TODO modify 'auxiliary loss' implementation(s) based on this:
+#  https://www.alignmentforum.org/posts/C5KAZQib3bzzpeyrg/progress-update-1-from-the-gdm-mech-interp-team-full-update#Improving_ghost_grads
+# TODO figure out how to incorporate ghost-grads-like auxiliary loss logic from sae_impls.py into losses.py/calc_loss()
 
 
 class SAE(nn.Module):

@@ -36,6 +36,7 @@ class SAETransformer(nn.Module):
         self,
         tlens_model: HookedTransformer,
         raw_sae_positions: list[str],
+            # TODO add list of objects describing the SAE's to be created (initially only supporting list of length 1)
         dict_size_to_input_ratio: float,
         init_decoder_orthogonal: bool = True,
     ):
@@ -45,12 +46,14 @@ class SAETransformer(nn.Module):
         self.hook_shapes: dict[str, list[int]] = get_hook_shapes(
             self.tlens_model, self.raw_sae_positions
         )
+        # TODO modify ModuleDict keys calculations to account for SAE variants/etc.
         # ModuleDict keys can't have periods in them, so we replace them with hyphens
         self.all_sae_positions = [name.replace(".", "-") for name in raw_sae_positions]
 
         self.saes = nn.ModuleDict()
         for i in range(len(self.all_sae_positions)):
             input_size = self.hook_shapes[self.raw_sae_positions[i]][-1]
+            #TODO call factory method for children of BaseAutoEncoder
             self.saes[self.all_sae_positions[i]] = SAE(
                 input_size=input_size,
                 n_dict_components=int(dict_size_to_input_ratio * input_size),
@@ -447,6 +450,7 @@ class SAETransformer(nn.Module):
         tlens_model = load_tlens_model(
             tlens_model_name=config["tlens_model_name"],
             tlens_model_path=config["tlens_model_path"],
+            tlens_model_dtype=config["tlens_model_dtype"]
         )
 
         raw_sae_positions = filter_names(

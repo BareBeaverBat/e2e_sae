@@ -8,7 +8,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, Literal, Self, Optional
 
 import fire
 import torch
@@ -25,7 +25,7 @@ from pydantic import (
     NonNegativeInt,
     PositiveFloat,
     PositiveInt,
-    model_validator,
+    model_validator
 )
 from torch import Tensor
 from torch.utils.data import DataLoader
@@ -43,6 +43,7 @@ from e2e_sae.metrics import (
     calc_sparsity_metrics,
     collect_act_frequency_metrics,
 )
+from e2e_sae.models.sparsifiers import SAE_Type
 from e2e_sae.models.transformers import SAETransformer
 from e2e_sae.types import RootPath, Samples
 from e2e_sae.utils import (
@@ -57,6 +58,48 @@ from e2e_sae.utils import (
 )
 
 
+class SAESpecConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    type: SAE_Type = Field(
+        "Vanilla", description="The type of SAE to train. E.g. 'Vanilla', 'BatchTopK'"
+    )
+    is_matryoshka: bool = Field(
+        False, description="Whether the SAE should use the (Bussman'24-style) Matryoshka training method."
+    )
+    dict_size_modifier: PositiveFloat = Field(
+        1.0,
+        description="Multiplicative modifier on the size of the dictionary (relative to the baseline ratio of dict size"
+                    " to SAE input size that's specified for all SAE's in the run)"
+    )
+    top_k: Optional[PositiveInt]
+    matryoshka_group_proportions: list[PositiveFloat] | None = Field(
+        description="If is_matryoshka, list of fractions that add to 1 (describing the jumps between the sizes of the "
+                    "nested groups of latents, as fractions of total number of latents in dictionary)"
+    )
+
+    @model_validator(mode='after')
+    def check_top_k(self) -> Self:
+        top_k_needed = self.type in ['TopK', 'BatchTopK']
+        if self.top_k is not None and not top_k_needed:
+            logger.warning(f"top_k parameter should not be set for irrelevant SAE type {self.type}, value={self.top_k}")
+        if self.top_k is None and top_k_needed:
+            raise ValueError(f"top_k parameter should be set for SAE type {self.type}")
+        return self
+
+    @model_validator(mode='after')
+    def check_matryoshka_group_proportions(self) -> Self:
+        if not self.is_matryoshka and self.matryoshka_group_proportions is not None:
+            logger.warning(f"matryoshka_group_proportions shouldn't be defined for an SAE that isn't using the "
+                           f"Matryoshka training method; proportions: {self.matryoshka_group_proportions}")
+        if self.is_matryoshka:
+            if self.matryoshka_group_proportions is None or len(self.matryoshka_group_proportions) == 0:
+                raise ValueError(f"matryoshka_group_proportions should be defined and non-empty for an SAE that is "
+                                 f"using the Matryoshka training method, value={self.matryoshka_group_proportions}")
+            elif abs(1.0-sum(self.matryoshka_group_proportions)) > 1e-6:
+                raise ValueError(f"matryoshka_group_proportions should sum to 1: {self.matryoshka_group_proportions}")
+        return self
+
+
 class SAEsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     dict_size_to_input_ratio: PositiveFloat = 1.0
@@ -64,6 +107,8 @@ class SAEsConfig(BaseModel):
         list[RootPath] | None, BeforeValidator(lambda x: [x] if isinstance(x, str | Path) else x)
     ] = Field(None, description="Path to a pretrained SAEs to load. If None, don't load any.")
     retrain_saes: bool = Field(False, description="Whether to retrain the pretrained SAEs.")
+    n_batches_to_dead: PositiveInt = Field(20, description="how many consecutive batches a latent can fail to ever "
+                                                           "fire for before it's considered dead")
     sae_positions: Annotated[
         list[str], BeforeValidator(lambda x: [x] if isinstance(x, str) else x)
     ] = Field(
@@ -71,6 +116,10 @@ class SAEsConfig(BaseModel):
         description="The names of the hook positions to train SAEs on. E.g. 'hook_resid_post' or "
         "['hook_resid_post', 'hook_mlp_out']. Each entry gets matched to all hook positions that "
         "contain the given string.",
+    )
+    sae_specs: list[SAESpecConfig] = Field(
+        description="Specifications of the SAE variants to train.",
+        default_factory=lambda: [SAESpecConfig()]
     )
 
 
@@ -93,6 +142,10 @@ class Config(BaseModel):
         None,
         description="Path to '.pt' checkpoint. The directory housing this file should also contain "
         "'final_config.yaml' which is output by e2e_sae/scripts/train_tlens/run_train_tlens.py.",
+    )
+    tlens_model_dtype: str | None = Field(
+        None, description="datatype to load the TransformerLens model in (e.g. float32, float16, or bfloat16),"
+                          "overriding whatever the default would've been for the chosen model and loading method"
     )
     save_dir: RootPath | None = Path(__file__).parent / "out"
     n_samples: PositiveInt | None = None
@@ -443,6 +496,7 @@ def train(
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     model.saes.parameters(), config.max_grad_norm
                 ).item()
+            #todo call .make_decoder_weights_and_grad_unit_norm() on SAE's
             optimizer.step()
             optimizer.zero_grad()
             grad_updates += 1
@@ -585,7 +639,8 @@ def main(
         config.train_data, batch_size=config.batch_size, global_seed=config.seed
     )[0]
     tlens_model = load_tlens_model(
-        tlens_model_name=config.tlens_model_name, tlens_model_path=config.tlens_model_path
+        tlens_model_name=config.tlens_model_name, tlens_model_path=config.tlens_model_path,
+        tlens_model_dtype=config["tlens_model_dtype"]
     )
 
     raw_sae_positions = filter_names(list(tlens_model.hook_dict.keys()), config.saes.sae_positions)

@@ -23,7 +23,8 @@ dependencies = [
     "umap-learn",
     "tenacity",
     "statsmodels",
-    "automated-interpretability"
+    "automated-interpretability",
+    "sae-lens"
 ]
 
 [project.urls]

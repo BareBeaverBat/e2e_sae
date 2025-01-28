@@ -2,6 +2,7 @@ from pathlib import Path
 
 import torch
 import yaml
+from sae_lens.config import DTYPE_MAP
 from transformer_lens import HookedTransformer, HookedTransformerConfig
 
 from e2e_sae.scripts.train_tlens.run_train_tlens import HookedTransformerPreConfig
@@ -9,11 +10,12 @@ from e2e_sae.types import RootPath
 
 
 def load_tlens_model(
-    tlens_model_name: str | None, tlens_model_path: RootPath | None
+    tlens_model_name: str | None, tlens_model_path: RootPath | None, tlens_model_dtype: str | None
 ) -> HookedTransformer:
     """Load transformerlens model from either HuggingFace or local path."""
     if tlens_model_name is not None:
-        tlens_model = HookedTransformer.from_pretrained(tlens_model_name)
+        tlens_model = HookedTransformer.from_pretrained(tlens_model_name) if tlens_model_dtype is None \
+            else HookedTransformer.from_pretrained(tlens_model_name, dtype=tlens_model_dtype)
     else:
         assert tlens_model_path is not None, "tlens_model_path is None."
         # Load the tlens_config
@@ -23,6 +25,10 @@ def load_tlens_model(
         with open(tlens_model_path.parent / "final_config.yaml") as f:
             tlens_config = HookedTransformerPreConfig(**yaml.safe_load(f)["tlens_config"])
         hooked_transformer_config = HookedTransformerConfig(**tlens_config.model_dump())
+        if tlens_model_dtype:
+            assert tlens_model_dtype in DTYPE_MAP, (f"tried to load local TransformerLens model with unsupported "
+                                                    f"override dtype {tlens_model_dtype}")
+            hooked_transformer_config.dtype = DTYPE_MAP[tlens_model_dtype]
 
         # Load the model
         tlens_model = HookedTransformer(hooked_transformer_config)

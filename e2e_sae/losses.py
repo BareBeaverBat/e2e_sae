@@ -146,6 +146,8 @@ class LossConfigs(BaseModel):
     out_to_orig: OutToOrigLoss | None
     out_to_in: OutToInLoss | None
     logits_kl: LogitsKLLoss | None
+    # TODO? ghost grads k
+    # TODO? ghost grads penalty coefficient
 
     @property
     def activation_loss_configs(
