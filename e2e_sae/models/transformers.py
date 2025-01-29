@@ -1,7 +1,8 @@
 import os
+import re
 from functools import partial
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, Optional, Callable
 
 import torch
 import tqdm
@@ -10,12 +11,15 @@ import yaml
 from jaxtyping import Float, Int
 from torch import Tensor, nn
 from transformer_lens import HookedTransformer
-from transformer_lens.utils import LocallyOverridenDefaults, sample_logits
+from transformer_lens.utils import LocallyOverridenDefaults, sample_logits, get_act_name
 from wandb.apis.public import Run
 
 from e2e_sae.hooks import CacheActs, SAEActs, cache_hook, sae_hook
 from e2e_sae.loader import load_tlens_model
+from e2e_sae.log import logger
+from e2e_sae.models.sae_impls import manufacture_SAE
 from e2e_sae.models.sparsifiers import SAE
+from e2e_sae.scripts.train_tlens_saes.tlens_sae_train_config import SAEsConfig, determine_SAE_instantiation_conf
 from e2e_sae.utils import filter_names, get_hook_shapes
 
 
@@ -36,9 +40,8 @@ class SAETransformer(nn.Module):
         self,
         tlens_model: HookedTransformer,
         raw_sae_positions: list[str],
-        # TODO add list of objects describing the SAE's to be created (initially only supporting list of length 1)
-        dict_size_to_input_ratio: float,
-        init_decoder_orthogonal: bool = True,
+        saes_config: SAEsConfig,
+        init_decoder_orthogonal: bool = True,  # TODO either add support for this in sae_impls or delete it
     ):
         super().__init__()
         self.tlens_model = tlens_model.eval()
@@ -46,19 +49,18 @@ class SAETransformer(nn.Module):
         self.hook_shapes: dict[str, list[int]] = get_hook_shapes(
             self.tlens_model, self.raw_sae_positions
         )
-        # TODO modify ModuleDict keys calculations to account for SAE variants/etc.
         # ModuleDict keys can't have periods in them, so we replace them with hyphens
         self.all_sae_positions = [name.replace(".", "-") for name in raw_sae_positions]
+        self.sae_specs = saes_config.sae_specs
 
         self.saes = nn.ModuleDict()
         for i in range(len(self.all_sae_positions)):
             input_size = self.hook_shapes[self.raw_sae_positions[i]][-1]
-            #TODO call factory method for children of BaseAutoEncoder
-            self.saes[self.all_sae_positions[i]] = SAE(
-                input_size=input_size,
-                n_dict_components=int(dict_size_to_input_ratio * input_size),
-                init_decoder_orthogonal=init_decoder_orthogonal,
-            )
+            for sae_spec_idx, sae_spec in enumerate(self.sae_specs):
+                sae_instance_key = f"{self.all_sae_positions[i]}-{sae_spec_idx}"
+                sae_instantiation_conf = determine_SAE_instantiation_conf(
+                    saes_config, sae_spec, input_size)
+                self.saes[sae_instance_key] = manufacture_SAE(sae_instantiation_conf)
 
     def forward_raw(
         self,
@@ -100,6 +102,8 @@ class SAETransformer(nn.Module):
         sae_positions: list[str],
         cache_positions: list[str] | None = None,
         orig_acts: dict[str, Float[Tensor, "batch pos dim"]] | None = None,
+        sae_variant_idx: int = 0,
+        should_run_to_logits: Optional[bool] = None
     ) -> tuple[Float[torch.Tensor, "batch pos d_vocab"] | None, dict[str, SAEActs | CacheActs]]:
         """Forward pass through the SAE-augmented model.
 
@@ -110,29 +114,35 @@ class SAETransformer(nn.Module):
 
         Args:
             tokens: The input tokens.
-            sae_hook_names: The names of the hooks to run the SAEs on.
+            sae_positions: The names of the hooks to run the SAEs on.
             cache_positions: Hooks to cache activations at in addition to the SAE positions.
             orig_acts: The activations of the original model. If not None, simply pass them through
                 the SAEs. If None, run the entire SAE-augmented model.
+            sae_variant_idx: index of the SAE spec to use at each SAE position
+            should_run_to_logits: whether the forward pass through the model should proceed past the layer of the
+                last SAE
 
         Returns:
-            - The logits of the SAE-augmented model. If `orig_acts` is not None, this will be None
+            - The logits of the SAE-augmented model. If should_run_thru_last_layer is true, this will be None
                 as the logits are not computed.
             - The activations of the SAE-augmented model.
         """
+        if should_run_to_logits is None:  # backwards compatibility
+            should_run_to_logits = orig_acts is None
+
         # sae_acts and cache_acts will be written into by sae_hook and cache_hook
         new_acts: dict[str, SAEActs | CacheActs] = {}
 
         new_logits: Float[Tensor, "batch pos vocab"] | None = None
-        # todo need to revise this to use start_at_layer overload of HookedTransformer.forward(),
-        #  maybe only if it's told to use just one particular type of SAE
-        if orig_acts is not None:
+
+        sae_pos_to_key: Callable[[str], str] = lambda pos: f"{pos.replace('.', '-')}-{sae_variant_idx}"
+        if orig_acts is not None and not should_run_to_logits:
             # Just run the already-stored activations through the SAEs
             for sae_pos in sae_positions:
                 sae_hook(
                     x=orig_acts[sae_pos].detach().clone(),
                     hook=None,
-                    sae=self.saes[sae_pos.replace(".", "-")],
+                    sae=self.saes[sae_pos_to_key(sae_pos)],
                     hook_acts=new_acts,
                     hook_key=sae_pos,
                 )
@@ -143,7 +153,7 @@ class SAETransformer(nn.Module):
                     sae_pos,
                     partial(
                         sae_hook,
-                        sae=cast(SAE, self.saes[sae_pos.replace(".", "-")]),
+                        sae=cast(SAE, self.saes[sae_pos_to_key(sae_pos)]),
                         hook_acts=new_acts,
                         hook_key=sae_pos,
                     ),
@@ -156,10 +166,64 @@ class SAETransformer(nn.Module):
                 if cache_pos not in sae_positions
             ]
 
-            new_logits = self.tlens_model.run_with_hooks(
-                tokens,
-                fwd_hooks=sae_hooks + cache_hooks,  # type: ignore
-            )
+            block_num_pattern = re.compile(r"^block\.(\d+)\.")
+
+            if should_run_to_logits:
+                model_inputs: Float[Tensor, "batch ... d_vocab"] | Float[Tensor, "batch ... model_act_sz"] = tokens
+                first_layer_to_run: Optional[int] = None
+                earliest_sae_pos: str = sae_positions[0]  # for troubleshooting
+                if orig_acts is not None:
+                    first_layer_to_run = self.tlens_model.cfg.n_layers-1
+                    for sae_pos_hook_nm in sae_positions:
+                        if sae_pos_hook_nm in ["hook_embed", "hook_pos_embed", "hook_tokens"]:
+                            first_layer_to_run = None
+                            break
+                        block_num_match = block_num_pattern.match(sae_pos_hook_nm)
+                        if block_num_match:
+                            curr_sae_layer = int(block_num_match.group(1))
+                            if curr_sae_layer < first_layer_to_run:
+                                first_layer_to_run = curr_sae_layer
+                                earliest_sae_pos = sae_pos_hook_nm
+                    if first_layer_to_run is not None:
+                        needed_cached_act_key = get_act_name("resid_pre", first_layer_to_run)
+                        if needed_cached_act_key in orig_acts:
+                            model_inputs = orig_acts[needed_cached_act_key]
+                        else:
+                            logger.info(f"Unable to skip computation for first {first_layer_to_run} layers because "
+                                        f"starting just before the earliest SAE position {earliest_sae_pos} requires "
+                                        f"cached activation of hook {needed_cached_act_key} but that isn't available;\n"
+                                        f"keys of available cached original activations={orig_acts.keys()}")
+                            first_layer_to_run = None
+
+                new_logits = self.tlens_model.run_with_hooks(
+                    model_inputs,
+                    fwd_hooks=sae_hooks + cache_hooks,  # type: ignore
+                    start_at_layer=first_layer_to_run
+                )
+            else:
+                # This branch implies orig_acts is None because of outer if-else context
+
+                # in case SAEs only hooked into tokens, embeddings, or positional embeddings
+                first_layer_to_not_run: Optional[int] = 0
+
+                for sae_pos_hook_nm in sae_positions:
+                    if sae_pos_hook_nm.startswith("ln_final"):
+                        logger.warning(f"SAETransformer.forward() was asked to not run through to logits and yet"
+                                       f"one of the SAE positions given was after the final layer; will return logits "
+                                       f"rather than residual stream")
+                        first_layer_to_not_run = None
+                        break
+                    block_num_match = block_num_pattern.match(sae_pos_hook_nm)
+                    if block_num_match:
+                        curr_sae_layer = int(block_num_match.group(1))
+                        if curr_sae_layer >= first_layer_to_not_run:
+                            first_layer_to_not_run = curr_sae_layer+1
+                new_logits = self.tlens_model.run_with_hooks(
+                    tokens,
+                    fwd_hooks=sae_hooks + cache_hooks,  # type: ignore
+                    stop_at_layer=first_layer_to_not_run
+                )
+
         return new_logits, new_acts
 
     def to(
@@ -459,11 +523,10 @@ class SAETransformer(nn.Module):
             list(tlens_model.hook_dict.keys()), config["saes"]["sae_positions"]
         )
 
-        #TODO update this after changing constructor
         model = cls(
             tlens_model=tlens_model,
             raw_sae_positions=raw_sae_positions,
-            dict_size_to_input_ratio=config["saes"]["dict_size_to_input_ratio"],
+            saes_config=config["saes"],
             init_decoder_orthogonal=False,
         )
 

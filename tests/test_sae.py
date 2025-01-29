@@ -54,7 +54,7 @@ def test_load_single_pretrained_sae(tmp_path: Path, retrain_saes: bool):
     model = SAETransformer(
         tlens_model=tlens_model,
         raw_sae_positions=[sae_position],
-        dict_size_to_input_ratio=pretrained_config.saes.dict_size_to_input_ratio,#TODO edit once constructor changed
+        saes_config=pretrained_config.saes,
         init_decoder_orthogonal=False,
     )
     # Save the model.saes to a temp file
@@ -79,7 +79,7 @@ def test_load_single_pretrained_sae(tmp_path: Path, retrain_saes: bool):
     new_model = SAETransformer(
         tlens_model=new_tlens_model,
         raw_sae_positions=sae_positions,
-        dict_size_to_input_ratio=new_config.saes.dict_size_to_input_ratio,#TODO edit once constructor changed
+        saes_config=new_config.saes,
         init_decoder_orthogonal=False,
     )
 
@@ -150,7 +150,7 @@ def test_load_multiple_pretrained_sae(tmp_path: Path):
         model = SAETransformer(
             tlens_model=tlens_model,
             raw_sae_positions=sae_positions,
-            dict_size_to_input_ratio=pretrained_config.saes.dict_size_to_input_ratio,#TODO edit once constructor changed
+            saes_config=pretrained_config.saes,
             init_decoder_orthogonal=False,
         )
         # Save the model.saes to a temp file
@@ -175,7 +175,7 @@ def test_load_multiple_pretrained_sae(tmp_path: Path):
     new_model = SAETransformer(
         tlens_model=new_tlens_model,
         raw_sae_positions=all_positions,
-        dict_size_to_input_ratio=new_config.saes.dict_size_to_input_ratio,#TODO edit once constructor changed
+        saes_config=new_config.saes,
         init_decoder_orthogonal=False,
     )
 

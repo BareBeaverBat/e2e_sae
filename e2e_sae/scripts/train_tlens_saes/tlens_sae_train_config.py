@@ -1,10 +1,10 @@
 import math
 from pathlib import Path
-from typing import Optional, Self, Annotated, Literal, Any
+from typing import Optional, Self, Annotated, Literal, Any, TypeVar
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, PositiveInt, model_validator, BeforeValidator, \
-    NonNegativeInt, NonNegativeFloat, conint
+    NonNegativeInt, NonNegativeFloat, conint, field_validator
 
 from e2e_sae.data import DatasetConfig
 from e2e_sae.log import logger
@@ -60,6 +60,7 @@ class SAESpecConfig(BaseModel):
                 raise ValueError(f"matryoshka_group_proportions should sum to 1: {self.matryoshka_group_proportions}")
         return self
 
+SAE_LIST_T = TypeVar('SAE_LIST_T')
 
 class SAEsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -82,6 +83,13 @@ class SAEsConfig(BaseModel):
         description="Specifications of the SAE variants to train.",
         default_factory=lambda: [SAESpecConfig()]
     )
+
+    @classmethod
+    @field_validator("sae_positions", "sae_specs", mode="after")
+    def validate_sae_lists(cls, value: list[SAE_LIST_T]) -> list[SAE_LIST_T]:
+        if len(value) == 0:
+            raise ValueError(f"SAEsConfig must have non-empty lists of sae positions and specifications (specs)")
+        return value
 
 
 class Config(BaseModel):
@@ -183,13 +191,12 @@ class Config(BaseModel):
 
 
 def determine_SAE_instantiation_conf(general_sae_configs: SAEsConfig, curr_sae_spec: SAESpecConfig,
-                                     curr_sae_model_act_size: int, model_device: str | int | torch.device
-                                     ) -> SAEInstantiationConfig:
+                                     curr_sae_model_act_size: int) -> SAEInstantiationConfig:
     curr_dict_size = int(curr_sae_model_act_size*general_sae_configs.dict_size_to_input_ratio
                          * curr_sae_spec.dict_size_modifier)
 
     instantiation_conf = SAEInstantiationConfig(
-        curr_sae_model_act_size, curr_dict_size, model_device, curr_sae_spec.type, curr_sae_spec.is_matryoshka,
+        curr_sae_model_act_size, curr_dict_size, curr_sae_spec.type, curr_sae_spec.is_matryoshka,
         n_batches_to_dead=general_sae_configs.n_batches_to_dead, ghost_grads_aux_k=curr_sae_spec.k_aux,
         ghost_grads_aux_coeff=curr_sae_spec.aux_coeff, top_k=curr_sae_spec.top_k)
 

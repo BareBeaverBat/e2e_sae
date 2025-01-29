@@ -17,7 +17,7 @@ def tinystories_model() -> SAETransformer:
     model = SAETransformer(
         tlens_model=tlens_model,
         raw_sae_positions=sae_positions,
-        dict_size_to_input_ratio=config.saes.dict_size_to_input_ratio,#TODO edit once constructor changed
+        saes_config=config.saes,
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)

@@ -19,8 +19,6 @@ class SAEInstantiationConfig:
     act_size: int
     dict_size: int
 
-    device: str | int | torch.device
-
     type: SAE_Type
     is_matryoshka: bool
 
@@ -57,7 +55,11 @@ class BaseAutoencoder(nn.Module):
         )
         self.W_dec.data[:] = self.W_enc.t().data
         self.W_dec.data[:] = self.W_dec / self.W_dec.norm(dim=-1, keepdim=True)
-        self.num_batches_not_active = torch.zeros((self.config.dict_size,), device=cfg.device)
+        self.num_batches_not_active = torch.zeros((self.config.dict_size,))
+
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        self.num_batches_not_active.to(*args, **kwargs)
 
     def preprocess_input(self, x):
         if self.config.input_unit_norm:
@@ -96,7 +98,7 @@ class BaseAutoencoder(nn.Module):
     def calc_ghost_grads_aux_loss(
             self, x: Float[Tensor, "batch ... model_act_sz"], x_reconstruct: Float[Tensor, "batch ... model_act_sz"],
             latent_acts: Float[Tensor, "batch ... n_latents"]) -> Float[Tensor, ""]:
-        aux_loss = torch.tensor(0.0, device=self.config.device)
+        aux_loss = torch.tensor(0.0, device=x.device)
         if self.config.ghost_grads_aux_coeff < 1e-8:
             return aux_loss
 
@@ -314,7 +316,7 @@ class BatchTopKSAE(BaseAutoencoder):
         if self.training:
             acts_topk = torch.topk(
                 acts.flatten(),
-                self.config["top_k"] * x.shape[0],
+                self.config.top_k * x.shape[0],
                 dim=-1
             )
             acts_topk = (
@@ -431,7 +433,7 @@ class TopKSAE(BaseAutoencoder):
         self.x_std = x_std
         x_cent = x - self.b_dec
         acts = F.relu(x_cent @ self.W_enc)
-        acts_topk = torch.topk(acts, self.config["top_k"], dim=-1)
+        acts_topk = torch.topk(acts, self.config.top_k, dim=-1)
         acts_topk = torch.zeros_like(acts).scatter(
             -1, acts_topk.indices, acts_topk.values
         )
@@ -525,6 +527,7 @@ class VanillaSAE(BaseAutoencoder):
     #         "l1_norm": l1_norm,
     #     }
     #     return output
+
 
 # Commenting out JumpReLU code for now because it isn't in the scope of this experiment and won't be supported
 # (e.g. bandwidth config option) or tested
