@@ -4,7 +4,7 @@ from typing import Optional, Self, Annotated, Literal, Any
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, PositiveInt, model_validator, BeforeValidator, \
-    NonNegativeInt, NonNegativeFloat
+    NonNegativeInt, NonNegativeFloat, conint
 
 from e2e_sae.data import DatasetConfig
 from e2e_sae.log import logger
@@ -31,6 +31,11 @@ class SAESpecConfig(BaseModel):
     matryoshka_group_proportions: list[PositiveFloat] | None = Field(
         description="If is_matryoshka, list of fractions that add to 1 (describing the jumps between the sizes of the "
                     "nested groups of latents, as fractions of total number of latents in dictionary)"
+    )
+    k_aux: PositiveInt = Field(512, description="max number of dead latents to use in auxiliary loss")
+    aux_coeff: Annotated[float, conint(ge=0)] = Field(
+        0, description="coefficient for ghost-grads-like auxiliary loss term in loss function (e.g. 1/32), "
+                       "most frequently used for TopK variants"
     )
 
     @model_validator(mode='after')
@@ -184,8 +189,9 @@ def determine_SAE_instantiation_conf(general_sae_configs: SAEsConfig, curr_sae_s
                          * curr_sae_spec.dict_size_modifier)
 
     instantiation_conf = SAEInstantiationConfig(
-        curr_sae_model_act_size, curr_dict_size, general_sae_configs.n_batches_to_dead, model_device,
-        curr_sae_spec.type, curr_sae_spec.is_matryoshka, top_k=curr_sae_spec.top_k)
+        curr_sae_model_act_size, curr_dict_size, model_device, curr_sae_spec.type, curr_sae_spec.is_matryoshka,
+        n_batches_to_dead=general_sae_configs.n_batches_to_dead, ghost_grads_aux_k=curr_sae_spec.k_aux,
+        ghost_grads_aux_coeff=curr_sae_spec.aux_coeff, top_k=curr_sae_spec.top_k)
 
     if curr_sae_spec.is_matryoshka:
         instantiation_conf.matryoshka_group_sizes = distribute_to_integers(curr_sae_spec.matryoshka_group_proportions,

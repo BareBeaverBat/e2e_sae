@@ -19,11 +19,15 @@ class SAEInstantiationConfig:
     act_size: int
     dict_size: int
 
-    n_batches_to_dead: int
     device: str | int | torch.device
 
     type: SAE_Type
     is_matryoshka: bool
+
+    n_batches_to_dead: int
+    ghost_grads_aux_k: int
+    # putting this here rather than in losses.py so that the aux loss computation can be skipped if the coeff is 0.0
+    ghost_grads_aux_coeff: float
 
     top_k: int | None = None
     matryoshka_group_sizes: list[int] | None = None
@@ -89,9 +93,35 @@ class BaseAutoencoder(nn.Module):
     def decode(self, latents: Float[Tensor, "... n_latents"]) -> Float[Tensor, "... model_act_sz"]:
         raise NotImplementedError("Decode method must be implemented by subclasses")
 
+    def calc_ghost_grads_aux_loss(
+            self, x: Float[Tensor, "batch ... model_act_sz"], x_reconstruct: Float[Tensor, "batch ... model_act_sz"],
+            latent_acts: Float[Tensor, "batch ... n_latents"]) -> Float[Tensor, ""]:
+        aux_loss = torch.tensor(0.0, device=self.config.device)
+        if self.config.ghost_grads_aux_coeff < 1e-8:
+            return aux_loss
+
+        residual: Float[Tensor, "batch ... model_act_sz"] = x - x_reconstruct
+        aux_reconstruct = torch.zeros_like(residual)
+
+        dead_latents_mask = self.num_batches_not_active >= self.config.n_batches_to_dead
+        n_dead_latents: int = dead_latents_mask.int().sum().item()
+        if n_dead_latents > 0:
+            acts_topk_aux = torch.topk(
+                latent_acts[:, dead_latents_mask], min(self.config.ghost_grads_aux_k, n_dead_latents), dim=-1
+            )
+            acts_aux = torch.zeros_like(latent_acts[:, dead_latents_mask]).scatter(
+                -1, acts_topk_aux.indices, acts_topk_aux.values
+            )
+            x_reconstruct_aux = acts_aux @ self.W_dec[dead_latents_mask, :]
+            aux_reconstruct = aux_reconstruct + x_reconstruct_aux
+
+        # TODO test to figure out why Bussman didn't just put this if block's body inside the previous if block's body
+        if aux_reconstruct.abs().sum().item() > 0:
+            aux_loss = (aux_reconstruct - residual).pow(2).mean()*self.config.ghost_grads_aux_coeff
+        return aux_loss
+
     # TODO implement resampling of dead latent neurons- ghost grads don't help if a latent's activation values are ~all
-    #  negative (and fitting the ghost-grads aux loss into the complex e2e+downstream-recon loss calculations might
-    #  not be worth the effort if resampling will be needed anyway)
+    #  negative
 
 
 def manufacture_SAE(instantiation_conf: SAEInstantiationConfig) -> BaseAutoencoder:
@@ -112,7 +142,10 @@ def manufacture_SAE(instantiation_conf: SAEInstantiationConfig) -> BaseAutoencod
 
 @dataclass(frozen=True)
 class SAEForwardTertiaryResults:
+    # only relevant if cfg.is_matryoshka
     intermediate_reconstructions: Optional[list[Float[Tensor, "batch ... model_act_sz"]]] = None
+
+    ghost_grads_aux_loss: Optional[Float[Tensor, ""]] = None
 
 
 class GlobalBatchTopKMatryoshkaSAE(BaseAutoencoder):
@@ -125,7 +158,6 @@ class GlobalBatchTopKMatryoshkaSAE(BaseAutoencoder):
         self.active_groups = len(cfg.matryoshka_group_sizes)
 
         self.register_buffer('threshold', torch.tensor(0.0))
-
 
     def compute_activations(self, x_cent: Float[Tensor, "batch ... model_act_sz"]) -> tuple[
         Float[Tensor, "batch ... n_latents"], Float[Tensor, "batch ... n_latents"]
@@ -194,9 +226,10 @@ class GlobalBatchTopKMatryoshkaSAE(BaseAutoencoder):
             intermediate_reconstructs.append(post_processed_x_recon)
 
         self.update_inactive_features(all_acts_topk)
+        ghost_grads_aux_loss = self.calc_ghost_grads_aux_loss(x, x_reconstruct, all_acts)
         sae_out: Float[Tensor, "batch ... model_act_sz"] = self.postprocess_output(x_reconstruct, x_mean, x_std)
         return sae_out, all_acts_topk, SAEForwardTertiaryResults(
-            intermediate_reconstructions=intermediate_reconstructs
+            intermediate_reconstructions=intermediate_reconstructs, ghost_grads_aux_loss=ghost_grads_aux_loss
         )
 
     # def get_loss_dict(self, x, x_reconstruct, all_acts, all_acts_topk, x_mean, x_std, intermediate_reconstructs):
@@ -302,9 +335,9 @@ class BatchTopKSAE(BaseAutoencoder):
         x_reconstruct = acts_topk @ self.W_dec + self.b_dec
         self.update_threshold(acts_topk)
         self.update_inactive_features(acts_topk)
+        ghost_grads_aux_loss = self.calc_ghost_grads_aux_loss(x, x_reconstruct, acts)
         sae_out = self.postprocess_output(x_reconstruct, x_mean, x_std)
-        # output = self.get_loss_dict(x, x_reconstruct, acts, acts_topk, x_mean, x_std)
-        return sae_out, acts_topk, SAEForwardTertiaryResults()
+        return sae_out, acts_topk, SAEForwardTertiaryResults(ghost_grads_aux_loss=ghost_grads_aux_loss)
 
     def encode(self, x):
         x, x_mean, x_std = self.preprocess_input(x)
@@ -388,9 +421,9 @@ class TopKSAE(BaseAutoencoder):
         x_reconstruct = acts_topk @ self.W_dec + self.b_dec
 
         self.update_inactive_features(acts_topk)
+        ghost_grads_aux_loss = self.calc_ghost_grads_aux_loss(x, x_reconstruct, acts)
         sae_out = self.postprocess_output(x_reconstruct, x_mean, x_std)
-        # output = self.get_loss_dict(x, x_reconstruct, acts, acts_topk, x_mean, x_std)
-        return sae_out, acts_topk, SAEForwardTertiaryResults()
+        return sae_out, acts_topk, SAEForwardTertiaryResults(ghost_grads_aux_loss=ghost_grads_aux_loss)
 
     def encode(self, x):
         x, x_mean, x_std = self.preprocess_input(x)
@@ -467,7 +500,8 @@ class VanillaSAE(BaseAutoencoder):
         self.update_inactive_features(acts)
         sae_out = self.postprocess_output(x_reconstruct, x_mean, x_std)
         # output = self.get_loss_dict(x, x_reconstruct, acts, x_mean, x_std)
-        return sae_out, acts, SAEForwardTertiaryResults()
+        ghost_grads_aux_loss = self.calc_ghost_grads_aux_loss(x, x_reconstruct, acts)
+        return sae_out, acts, SAEForwardTertiaryResults(ghost_grads_aux_loss=ghost_grads_aux_loss)
 
     # def get_loss_dict(self, x, x_reconstruct, acts, x_mean, x_std):
     #     l2_loss = (x_reconstruct.float() - x.float()).pow(2).mean()

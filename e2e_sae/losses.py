@@ -211,6 +211,12 @@ def calc_loss(
         orig_act = orig_act.detach().clone()
         new_act = new_acts[name]
 
+        if (isinstance(new_act, SAEActs) and new_act.tertiary_SAE_results and
+                new_act.tertiary_SAE_results.ghost_grads_aux_loss is not None):
+            ghost_grads_aux_loss = new_act.tertiary_SAE_results.ghost_grads_aux_loss
+            loss += ghost_grads_aux_loss
+            loss_dict[f"{prefix}/ghost_grads_aux/{name}"] = ghost_grads_aux_loss
+
         for config_type, loss_config in loss_configs.activation_loss_configs.items():
             if isinstance(new_act, CacheActs) and not isinstance(loss_config, InToOrigLoss):
                 # Cache acts are only used for in_to_orig loss

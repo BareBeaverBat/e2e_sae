@@ -1,9 +1,10 @@
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Optional
 
 import torch
 from jaxtyping import Float
 from transformer_lens.hook_points import HookPoint
 
+from e2e_sae.models.sae_impls import SAEForwardTertiaryResults
 from e2e_sae.models.sparsifiers import SAE
 
 
@@ -15,6 +16,7 @@ class SAEActs(NamedTuple):
     input: Float[torch.Tensor, "... dim"]
     c: Float[torch.Tensor, "... c"]
     output: Float[torch.Tensor, "... dim"]
+    tertiary_SAE_results: Optional[SAEForwardTertiaryResults] = None
 
 
 def sae_hook(
@@ -36,8 +38,8 @@ def sae_hook(
     Returns:
         The output of the SAE.
     """
-    output, c, _ = sae(x)
-    hook_acts[hook_key] = SAEActs(input=x, c=c, output=output)
+    output, c, tertiary_results = sae(x)
+    hook_acts[hook_key] = SAEActs(input=x, c=c, output=output, tertiary_SAE_results=tertiary_results)
     return output
 
 
