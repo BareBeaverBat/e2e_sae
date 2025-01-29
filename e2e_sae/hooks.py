@@ -36,7 +36,7 @@ def sae_hook(
     Returns:
         The output of the SAE.
     """
-    output, c = sae(x)
+    output, c, _ = sae(x)
     hook_acts[hook_key] = SAEActs(input=x, c=c, output=output)
     return output
 

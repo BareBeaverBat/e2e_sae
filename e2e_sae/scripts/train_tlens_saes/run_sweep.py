@@ -8,7 +8,7 @@ Usage:
 import yaml
 from fire import Fire
 
-from e2e_sae.scripts.train_tlens_saes.run_train_tlens_saes import Config
+from e2e_sae.scripts.train_tlens_saes.tlens_sae_train_config import Config
 from e2e_sae.scripts.train_tlens_saes.run_train_tlens_saes import main as run_train
 from e2e_sae.utils import replace_pydantic_model
 

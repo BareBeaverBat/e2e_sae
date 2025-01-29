@@ -1,42 +1,62 @@
 # Overwhelming majority of this file was copied from https://github.com/bartbussmann/matryoshka_sae/blob/main/sae.py
+from dataclasses import dataclass
+from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.autograd as autograd
+from jaxtyping import Float
+from torch import Tensor
+
+from e2e_sae.models.sparsifiers import SAE_Type
+
+
+# import torch.autograd as autograd # for JumpReLU implementation
+
+
+@dataclass
+class SAEInstantiationConfig:
+    act_size: int
+    dict_size: int
+
+    n_batches_to_dead: int
+    device: str | int | torch.device
+
+    type: SAE_Type
+    is_matryoshka: bool
+
+    top_k: int | None = None
+    matryoshka_group_sizes: list[int] | None = None
+
+    input_unit_norm: bool = False
 
 
 class BaseAutoencoder(nn.Module):
     """Base class for autoencoder models."""
 
-    def __init__(self, cfg):
+    def __init__(self, cfg: SAEInstantiationConfig):
         super().__init__()
 
         self.config = cfg
-        torch.manual_seed(self.config["seed"])
 
-        self.b_dec = nn.Parameter(torch.zeros(self.config["act_size"]))
-        self.b_enc = nn.Parameter(torch.zeros(self.config["dict_size"]))
+        self.b_dec = nn.Parameter(torch.zeros(self.config.act_size))
+        self.b_enc = nn.Parameter(torch.zeros(self.config.dict_size))
         self.W_enc = nn.Parameter(
             torch.nn.init.kaiming_uniform_(
-                torch.empty(self.config["act_size"], self.config["dict_size"])
+                torch.empty(self.config.act_size, self.config.dict_size)
             )
         )
         self.W_dec = nn.Parameter(
             torch.nn.init.kaiming_uniform_(
-                torch.empty(self.config["dict_size"], self.config["act_size"])
+                torch.empty(self.config.dict_size, self.config.act_size)
             )
         )
         self.W_dec.data[:] = self.W_enc.t().data
         self.W_dec.data[:] = self.W_dec / self.W_dec.norm(dim=-1, keepdim=True)
-        self.num_batches_not_active = torch.zeros((self.config["dict_size"],)).to(
-            cfg["device"]
-        )
-
-        self.to(cfg["dtype"]).to(cfg["device"])
+        self.num_batches_not_active = torch.zeros((self.config.dict_size,), device=cfg.device)
 
     def preprocess_input(self, x):
-        if self.config["input_unit_norm"]:
+        if self.config.input_unit_norm:
             x_mean = x.mean(dim=-1, keepdim=True)
             x = x - x_mean
             x_std = x.std(dim=-1, keepdim=True)
@@ -45,7 +65,7 @@ class BaseAutoencoder(nn.Module):
         return x, None, None
 
     def postprocess_output(self, x_reconstruct, x_mean, x_std):
-        if self.config["input_unit_norm"]:
+        if self.config.input_unit_norm:
             x_reconstruct = x_reconstruct * x_std + x_mean
         return x_reconstruct
 
@@ -63,50 +83,60 @@ class BaseAutoencoder(nn.Module):
         self.num_batches_not_active += (acts.sum(0) == 0).float()
         self.num_batches_not_active[acts.sum(0) > 0] = 0
 
-    def encode(self, x):
+    def encode(self, x: Float[Tensor, "... model_act_sz"]) -> Float[Tensor, "... n_latents"]:
         raise NotImplementedError("Encode method must be implemented by subclasses")
+
+    def decode(self, latents: Float[Tensor, "... n_latents"]) -> Float[Tensor, "... model_act_sz"]:
+        raise NotImplementedError("Decode method must be implemented by subclasses")
+
+    # TODO implement resampling of dead latent neurons- ghost grads don't help if a latent's activation values are ~all
+    #  negative (and fitting the ghost-grads aux loss into the complex e2e+downstream-recon loss calculations might
+    #  not be worth the effort if resampling will be needed anyway)
+
+
+def manufacture_SAE(instantiation_conf: SAEInstantiationConfig) -> BaseAutoencoder:
+    sae_type = instantiation_conf.type
+    if instantiation_conf.is_matryoshka:
+        if sae_type == "BatchTopK":
+            return GlobalBatchTopKMatryoshkaSAE(instantiation_conf)
+        else:
+            raise ValueError(f"don't currently support a Matryoshka version of the {sae_type} SAE type")
+    else:
+        if sae_type == "Vanilla":
+            return VanillaSAE(instantiation_conf)
+        elif sae_type == "BatchTopK":
+            return BatchTopKSAE(instantiation_conf)
+        else:
+            raise ValueError(f"don't currently support a non-Matryoshka version of the {sae_type} SAE type")
+
+
+@dataclass(frozen=True)
+class SAEForwardTertiaryResults:
+    intermediate_reconstructions: Optional[list[Float[Tensor, "batch ... model_act_sz"]]] = None
 
 
 class GlobalBatchTopKMatryoshkaSAE(BaseAutoencoder):
     def __init__(self, cfg):
         super().__init__(cfg)
 
-        total_dict_size = sum(cfg["group_sizes"])
-        self.group_sizes = cfg["group_sizes"]
+        self.group_sizes = cfg.matryoshka_group_sizes
 
-        self.group_indices = [0] + list(torch.cumsum(torch.tensor(cfg["group_sizes"]), dim=0))
-        self.active_groups = len(cfg["group_sizes"])
+        self.group_indices = [0] + list(torch.cumsum(torch.tensor(cfg.matryoshka_group_sizes), dim=0))
+        self.active_groups = len(cfg.matryoshka_group_sizes)
 
-        self.b_dec = nn.Parameter(torch.zeros(self.config["act_size"]))
-        self.b_enc = nn.Parameter(torch.zeros(total_dict_size))
-
-        self.W_enc = nn.Parameter(
-            torch.nn.init.kaiming_uniform_(
-                torch.empty(cfg["act_size"], total_dict_size)
-            )
-        )
-
-        self.W_dec = nn.Parameter(
-            torch.nn.init.kaiming_uniform_(
-                torch.empty(total_dict_size, cfg["act_size"])
-            )
-        )
-
-        self.W_dec.data[:] = self.W_enc.t().data
-        self.W_dec.data[:] = self.W_dec / self.W_dec.norm(dim=-1, keepdim=True)
-
-        self.num_batches_not_active = torch.zeros(total_dict_size, device=cfg["device"])
         self.register_buffer('threshold', torch.tensor(0.0))
-        self.to(cfg["dtype"]).to(cfg["device"])
 
-    def compute_activations(self, x_cent):
+
+    def compute_activations(self, x_cent: Float[Tensor, "batch ... model_act_sz"]) -> tuple[
+        Float[Tensor, "batch ... n_latents"], Float[Tensor, "batch ... n_latents"]
+    ]:
         pre_acts = x_cent @ self.W_enc
         acts = F.relu(pre_acts)
 
         if self.training:
             acts_topk = torch.topk(
                 acts.flatten(),
-                self.config["top_k"] * x_cent.shape[0],
+                self.config.top_k * x_cent.shape[0],
                 dim=-1
             )
             acts_topk = (
@@ -139,7 +169,13 @@ class GlobalBatchTopKMatryoshkaSAE(BaseAutoencoder):
         reconstruct = acts_topk @ self.W_dec + self.b_dec
         return self.postprocess_output(reconstruct, self.x_mean, self.x_std)
 
-    def forward(self, x):
+    def forward(self, x: Float[Tensor, "batch ... model_act_sz"]) -> tuple[
+        Float[Tensor, "batch ... model_act_sz"], Float[Tensor, "batch ... n_latents"], SAEForwardTertiaryResults
+    ]:
+        # return tuple:
+        # 0) the reconstruction
+        # 1) the latent activations (after batch top k)
+        # 2) dict containing ? (e.g. the intermediate reconstructions)
         x, x_mean, x_std = self.preprocess_input(x)
 
         x_cent = x - self.b_dec
@@ -154,73 +190,75 @@ class GlobalBatchTopKMatryoshkaSAE(BaseAutoencoder):
             W_dec_slice = self.W_dec[start_idx:end_idx, :]
             acts_topk = all_acts_topk[:, start_idx:end_idx]
             x_reconstruct = acts_topk @ W_dec_slice + x_reconstruct
-            intermediate_reconstructs.append(x_reconstruct)
+            post_processed_x_recon = self.postprocess_output(x_reconstruct, x_mean, x_std)
+            intermediate_reconstructs.append(post_processed_x_recon)
 
         self.update_inactive_features(all_acts_topk)
-        output = self.get_loss_dict(x, x_reconstruct, all_acts, all_acts_topk, x_mean,
-                                    x_std, intermediate_reconstructs)
-        return output
+        sae_out: Float[Tensor, "batch ... model_act_sz"] = self.postprocess_output(x_reconstruct, x_mean, x_std)
+        return sae_out, all_acts_topk, SAEForwardTertiaryResults(
+            intermediate_reconstructions=intermediate_reconstructs
+        )
 
-    def get_loss_dict(self, x, x_reconstruct, all_acts, all_acts_topk, x_mean, x_std, intermediate_reconstructs):
-        total_l2_loss = (self.b_dec - x.float()).pow(2).mean()
-        l2_losses = torch.tensor([]).to(x.device)
-        for intermediate_reconstruct in intermediate_reconstructs:
-            l2_losses = torch.cat([l2_losses, (intermediate_reconstruct.float() -
-                                               x.float()).pow(2).mean().unsqueeze(0)])
-            total_l2_loss += (intermediate_reconstruct.float() - x.float()).pow(2).mean()
+    # def get_loss_dict(self, x, x_reconstruct, all_acts, all_acts_topk, x_mean, x_std, intermediate_reconstructs):
+    #     total_l2_loss = (self.b_dec - x.float()).pow(2).mean()
+    #     l2_losses = torch.tensor([]).to(x.device)
+    #     for intermediate_reconstruct in intermediate_reconstructs:
+    #         l2_losses = torch.cat([l2_losses, (intermediate_reconstruct.float() -
+    #                                            x.float()).pow(2).mean().unsqueeze(0)])
+    #         total_l2_loss += (intermediate_reconstruct.float() - x.float()).pow(2).mean()
+    #
+    #     min_l2_loss = l2_losses.min()
+    #     max_l2_loss = l2_losses.max()
+    #     mean_l2_loss = total_l2_loss / (len(intermediate_reconstructs) + 1)
+    #
+    #     l1_norm = all_acts_topk.float().abs().sum(-1).mean()
+    #     l0_norm = (all_acts_topk > 0).float().sum(-1).mean()
+    #     l1_loss = self.config["l1_coeff"] * l1_norm
+    #     aux_loss = self.get_auxiliary_loss(x, x_reconstruct, all_acts)
+    #     loss = mean_l2_loss + l1_loss + aux_loss
+    #
+    #     num_dead_features = (self.num_batches_not_active > self.config["n_batches_to_dead"]).sum()
+    #     sae_out = self.postprocess_output(x_reconstruct, x_mean, x_std)
+    #     output = {
+    #         "sae_out": sae_out,
+    #         "feature_acts": all_acts_topk,
+    #         "num_dead_features": num_dead_features,
+    #         "loss": loss,
+    #         "l1_loss": l1_loss,
+    #         "l2_loss": mean_l2_loss,
+    #         "min_l2_loss": min_l2_loss,
+    #         "max_l2_loss": max_l2_loss,
+    #         "l0_norm": l0_norm,
+    #         "l1_norm": l1_norm,
+    #         "aux_loss": aux_loss,
+    #         "threshold": self.threshold,
+    #     }
+    #     return output
 
-        min_l2_loss = l2_losses.min()
-        max_l2_loss = l2_losses.max()
-        mean_l2_loss = total_l2_loss / (len(intermediate_reconstructs) + 1)
-
-        l1_norm = all_acts_topk.float().abs().sum(-1).mean()
-        l0_norm = (all_acts_topk > 0).float().sum(-1).mean()
-        l1_loss = self.config["l1_coeff"] * l1_norm
-        aux_loss = self.get_auxiliary_loss(x, x_reconstruct, all_acts)
-        loss = mean_l2_loss + l1_loss + aux_loss
-
-        num_dead_features = (self.num_batches_not_active > self.config["n_batches_to_dead"]).sum()
-        sae_out = self.postprocess_output(x_reconstruct, x_mean, x_std)
-        output = {
-            "sae_out": sae_out,
-            "feature_acts": all_acts_topk,
-            "num_dead_features": num_dead_features,
-            "loss": loss,
-            "l1_loss": l1_loss,
-            "l2_loss": mean_l2_loss,
-            "min_l2_loss": min_l2_loss,
-            "max_l2_loss": max_l2_loss,
-            "l0_norm": l0_norm,
-            "l1_norm": l1_norm,
-            "aux_loss": aux_loss,
-            "threshold": self.threshold,
-        }
-        return output
-
-    def get_auxiliary_loss(self, x, x_reconstruct, all_acts):
-        residual = x.float() - x_reconstruct.float()
-        aux_reconstruct = torch.zeros_like(residual)
-
-        acts = all_acts
-        dead_features = self.num_batches_not_active >= self.config["n_batches_to_dead"]
-
-        if dead_features.sum() > 0:
-            acts_topk_aux = torch.topk(
-                acts[:, dead_features],
-                min(self.config["top_k_aux"], dead_features.sum()),
-                dim=-1,
-            )
-            acts_aux = torch.zeros_like(acts[:, dead_features]).scatter(
-                -1, acts_topk_aux.indices, acts_topk_aux.values
-            )
-            x_reconstruct_aux = acts_aux @ self.W_dec[dead_features]
-            aux_reconstruct = aux_reconstruct + x_reconstruct_aux
-
-        if aux_reconstruct.abs().sum() > 0:
-            aux_loss = self.config["aux_penalty"] * (aux_reconstruct.float() - residual.float()).pow(2).mean()
-            return aux_loss
-
-        return torch.tensor(0.0, device=x.device)
+    # def get_auxiliary_loss(self, x, x_reconstruct, all_acts):
+    #     residual = x.float() - x_reconstruct.float()
+    #     aux_reconstruct = torch.zeros_like(residual)
+    #
+    #     acts = all_acts
+    #     dead_features = self.num_batches_not_active >= self.config["n_batches_to_dead"]
+    #
+    #     if dead_features.sum() > 0:
+    #         acts_topk_aux = torch.topk(
+    #             acts[:, dead_features],
+    #             min(self.config["top_k_aux"], dead_features.sum().item()),
+    #             dim=-1,
+    #         )
+    #         acts_aux = torch.zeros_like(acts[:, dead_features]).scatter(
+    #             -1, acts_topk_aux.indices, acts_topk_aux.values
+    #         )
+    #         x_reconstruct_aux = acts_aux @ self.W_dec[dead_features]
+    #         aux_reconstruct = aux_reconstruct + x_reconstruct_aux
+    #
+    #     if aux_reconstruct.abs().sum() > 0:
+    #         aux_loss = self.config["aux_penalty"] * (aux_reconstruct.float() - residual.float()).pow(2).mean()
+    #         return aux_loss
+    #
+    #     return torch.tensor(0.0, device=x.device)
 
     @torch.no_grad()
     def update_threshold(self, acts_topk, lr=0.01):
@@ -256,14 +294,17 @@ class BatchTopKSAE(BaseAutoencoder):
 
         return acts, acts_topk
 
-    def forward(self, x):
+    def forward(self, x: Float[Tensor, "batch ... model_act_sz"]) -> tuple[
+        Float[Tensor, "batch ... model_act_sz"], Float[Tensor, "batch ... n_latents"], SAEForwardTertiaryResults
+    ]:
         x, x_mean, x_std = self.preprocess_input(x)
         acts, acts_topk = self.compute_activations(x)
         x_reconstruct = acts_topk @ self.W_dec + self.b_dec
         self.update_threshold(acts_topk)
         self.update_inactive_features(acts_topk)
-        output = self.get_loss_dict(x, x_reconstruct, acts, acts_topk, x_mean, x_std)
-        return output
+        sae_out = self.postprocess_output(x_reconstruct, x_mean, x_std)
+        # output = self.get_loss_dict(x, x_reconstruct, acts, acts_topk, x_mean, x_std)
+        return sae_out, acts_topk, SAEForwardTertiaryResults()
 
     def encode(self, x):
         x, x_mean, x_std = self.preprocess_input(x)
@@ -276,50 +317,50 @@ class BatchTopKSAE(BaseAutoencoder):
         x_reconstruct = acts_topk @ self.W_dec + self.b_dec
         return self.postprocess_output(x_reconstruct, self.x_mean, self.x_std)
 
-    def get_loss_dict(self, x, x_reconstruct, acts, acts_topk, x_mean, x_std):
-        l2_loss = (x_reconstruct.float() - x.float()).pow(2).mean()
-        l1_norm = acts_topk.float().abs().sum(-1).mean()
-        l1_loss = self.config["l1_coeff"] * l1_norm
-        l0_norm = (acts_topk > 0).float().sum(-1).mean()
-        aux_loss = self.get_auxiliary_loss(x, x_reconstruct, acts)
-        loss = l2_loss + l1_loss + aux_loss
-        num_dead_features = (
-                self.num_batches_not_active > self.config["n_batches_to_dead"]
-        ).sum()
-        sae_out = self.postprocess_output(x_reconstruct, x_mean, x_std)
-        output = {
-            "sae_out": sae_out,
-            "feature_acts": acts_topk,
-            "num_dead_features": num_dead_features,
-            "loss": loss,
-            "l1_loss": l1_loss,
-            "l2_loss": l2_loss,
-            "l0_norm": l0_norm,
-            "l1_norm": l1_norm,
-            "aux_loss": aux_loss,
-            "threshold": self.threshold,
-        }
-        return output
+    # def get_loss_dict(self, x, x_reconstruct, acts, acts_topk, x_mean, x_std):
+    #     l2_loss = (x_reconstruct.float() - x.float()).pow(2).mean()
+    #     l1_norm = acts_topk.float().abs().sum(-1).mean()
+    #     l1_loss = self.config["l1_coeff"] * l1_norm
+    #     l0_norm = (acts_topk > 0).float().sum(-1).mean()
+    #     aux_loss = self.get_auxiliary_loss(x, x_reconstruct, acts)
+    #     loss = l2_loss + l1_loss + aux_loss
+    #     num_dead_features = (
+    #             self.num_batches_not_active > self.config["n_batches_to_dead"]
+    #     ).sum()
+    #     sae_out = self.postprocess_output(x_reconstruct, x_mean, x_std)
+    #     output = {
+    #         "sae_out": sae_out,
+    #         "feature_acts": acts_topk,
+    #         "num_dead_features": num_dead_features,
+    #         "loss": loss,
+    #         "l1_loss": l1_loss,
+    #         "l2_loss": l2_loss,
+    #         "l0_norm": l0_norm,
+    #         "l1_norm": l1_norm,
+    #         "aux_loss": aux_loss,
+    #         "threshold": self.threshold,
+    #     }
+    #     return output
 
-    def get_auxiliary_loss(self, x, x_reconstruct, acts):
-        dead_features = self.num_batches_not_active >= self.config["n_batches_to_dead"]
-        if dead_features.sum() > 0:
-            residual = x.float() - x_reconstruct.float()
-            acts_topk_aux = torch.topk(
-                acts[:, dead_features],
-                min(self.config["top_k_aux"], dead_features.sum()),
-                dim=-1,
-            )
-            acts_aux = torch.zeros_like(acts[:, dead_features]).scatter(
-                -1, acts_topk_aux.indices, acts_topk_aux.values
-            )
-            x_reconstruct_aux = acts_aux @ self.W_dec[dead_features]
-            l2_loss_aux = (
-                    self.config["aux_penalty"]
-                    * (x_reconstruct_aux.float() - residual.float()).pow(2).mean()
-            )
-            return l2_loss_aux
-        return torch.tensor(0, dtype=x.dtype, device=x.device)
+    # def get_auxiliary_loss(self, x, x_reconstruct, acts):
+    #     dead_features = self.num_batches_not_active >= self.config["n_batches_to_dead"]
+    #     if dead_features.sum() > 0:
+    #         residual = x.float() - x_reconstruct.float()
+    #         acts_topk_aux = torch.topk(
+    #             acts[:, dead_features],
+    #             min(self.config["top_k_aux"], dead_features.sum()),
+    #             dim=-1,
+    #         )
+    #         acts_aux = torch.zeros_like(acts[:, dead_features]).scatter(
+    #             -1, acts_topk_aux.indices, acts_topk_aux.values
+    #         )
+    #         x_reconstruct_aux = acts_aux @ self.W_dec[dead_features]
+    #         l2_loss_aux = (
+    #                 self.config["aux_penalty"]
+    #                 * (x_reconstruct_aux.float() - residual.float()).pow(2).mean()
+    #         )
+    #         return l2_loss_aux
+    #     return torch.tensor(0, dtype=x.dtype, device=x.device)
 
     @torch.no_grad()
     def update_threshold(self, acts_topk, lr=0.01):
@@ -333,20 +374,23 @@ class TopKSAE(BaseAutoencoder):
     def __init__(self, cfg):
         super().__init__(cfg)
 
-    def forward(self, x):
+    def forward(self, x: Float[Tensor, "batch ... model_act_sz"]) -> tuple[
+        Float[Tensor, "batch ... model_act_sz"], Float[Tensor, "batch ... n_latents"], SAEForwardTertiaryResults
+    ]:
         x, x_mean, x_std = self.preprocess_input(x)
 
         x_cent = x - self.b_dec
         acts = F.relu(x_cent @ self.W_enc)
-        acts_topk = torch.topk(acts, self.config["top_k"], dim=-1)
+        acts_topk = torch.topk(acts, self.config.top_k, dim=-1)
         acts_topk = torch.zeros_like(acts).scatter(
             -1, acts_topk.indices, acts_topk.values
         )
         x_reconstruct = acts_topk @ self.W_dec + self.b_dec
 
         self.update_inactive_features(acts_topk)
-        output = self.get_loss_dict(x, x_reconstruct, acts, acts_topk, x_mean, x_std)
-        return output
+        sae_out = self.postprocess_output(x_reconstruct, x_mean, x_std)
+        # output = self.get_loss_dict(x, x_reconstruct, acts, acts_topk, x_mean, x_std)
+        return sae_out, acts_topk, SAEForwardTertiaryResults()
 
     def encode(self, x):
         x, x_mean, x_std = self.preprocess_input(x)
@@ -364,88 +408,93 @@ class TopKSAE(BaseAutoencoder):
         out = acts @ self.W_dec + self.b_dec
         return self.postprocess_output(out, self.x_mean, self.x_std)
 
-    def get_loss_dict(self, x, x_reconstruct, acts, acts_topk, x_mean, x_std):
-        l2_loss = (x_reconstruct.float() - x.float()).pow(2).mean()
-        l1_norm = acts_topk.float().abs().sum(-1).mean()
-        l1_loss = self.config["l1_coeff"] * l1_norm
-        l0_norm = (acts_topk > 0).float().sum(-1).mean()
-        aux_loss = self.get_auxiliary_loss(x, x_reconstruct, acts)
-        loss = l2_loss + l1_loss + aux_loss
-        num_dead_features = (
-                self.num_batches_not_active > self.config["n_batches_to_dead"]
-        ).sum()
-        sae_out = self.postprocess_output(x_reconstruct, x_mean, x_std)
-        output = {
-            "sae_out": sae_out,
-            "feature_acts": acts_topk,
-            "num_dead_features": num_dead_features,
-            "loss": loss,
-            "l1_loss": l1_loss,
-            "l2_loss": l2_loss,
-            "l0_norm": l0_norm,
-            "l1_norm": l1_norm,
-            "aux_loss": aux_loss,
-        }
-        return output
+    # def get_loss_dict(self, x, x_reconstruct, acts, acts_topk, x_mean, x_std):
+    #     l2_loss = (x_reconstruct.float() - x.float()).pow(2).mean()
+    #     l1_norm = acts_topk.float().abs().sum(-1).mean()
+    #     l1_loss = self.config["l1_coeff"] * l1_norm
+    #     l0_norm = (acts_topk > 0).float().sum(-1).mean()
+    #     aux_loss = self.get_auxiliary_loss(x, x_reconstruct, acts)
+    #     loss = l2_loss + l1_loss + aux_loss
+    #     num_dead_features = (
+    #             self.num_batches_not_active > self.config["n_batches_to_dead"]
+    #     ).sum()
+    #     sae_out = self.postprocess_output(x_reconstruct, x_mean, x_std)
+    #     output = {
+    #         "sae_out": sae_out,
+    #         "feature_acts": acts_topk,
+    #         "num_dead_features": num_dead_features,
+    #         "loss": loss,
+    #         "l1_loss": l1_loss,
+    #         "l2_loss": l2_loss,
+    #         "l0_norm": l0_norm,
+    #         "l1_norm": l1_norm,
+    #         "aux_loss": aux_loss,
+    #     }
+    #     return output
 
-    def get_auxiliary_loss(self, x, x_reconstruct, acts):
-        dead_features = self.num_batches_not_active >= self.config["n_batches_to_dead"]
-        if dead_features.sum() > 0:
-            residual = x.float() - x_reconstruct.float()
-            acts_topk_aux = torch.topk(
-                acts[:, dead_features],
-                min(self.config["top_k_aux"], dead_features.sum()),
-                dim=-1,
-            )
-            acts_aux = torch.zeros_like(acts[:, dead_features]).scatter(
-                -1, acts_topk_aux.indices, acts_topk_aux.values
-            )
-            x_reconstruct_aux = acts_aux @ self.W_dec[dead_features]
-            l2_loss_aux = (
-                    self.config["aux_penalty"]
-                    * (x_reconstruct_aux.float() - residual.float()).pow(2).mean()
-            )
-            return l2_loss_aux
-        return torch.tensor(0, dtype=x.dtype, device=x.device)
+    # def get_auxiliary_loss(self, x, x_reconstruct, acts):
+    #     dead_features = self.num_batches_not_active >= self.config["n_batches_to_dead"]
+    #     if dead_features.sum() > 0:
+    #         residual = x.float() - x_reconstruct.float()
+    #         acts_topk_aux = torch.topk(
+    #             acts[:, dead_features],
+    #             min(self.config["top_k_aux"], dead_features.sum()),
+    #             dim=-1,
+    #         )
+    #         acts_aux = torch.zeros_like(acts[:, dead_features]).scatter(
+    #             -1, acts_topk_aux.indices, acts_topk_aux.values
+    #         )
+    #         x_reconstruct_aux = acts_aux @ self.W_dec[dead_features]
+    #         l2_loss_aux = (
+    #                 self.config["aux_penalty"]
+    #                 * (x_reconstruct_aux.float() - residual.float()).pow(2).mean()
+    #         )
+    #         return l2_loss_aux
+    #     return torch.tensor(0, dtype=x.dtype, device=x.device)
 
 
 class VanillaSAE(BaseAutoencoder):
     def __init__(self, cfg):
         super().__init__(cfg)
 
-    def forward(self, x):
+    def forward(self, x: Float[Tensor, "batch ... model_act_sz"]) -> tuple[
+        Float[Tensor, "batch ... model_act_sz"], Float[Tensor, "batch ... n_latents"], SAEForwardTertiaryResults
+    ]:
         x, x_mean, x_std = self.preprocess_input(x)
         x_cent = x - self.b_dec
         acts = F.relu(x_cent @ self.W_enc + self.b_enc)
         x_reconstruct = acts @ self.W_dec + self.b_dec
         self.update_inactive_features(acts)
-        output = self.get_loss_dict(x, x_reconstruct, acts, x_mean, x_std)
-        return output
-
-    def get_loss_dict(self, x, x_reconstruct, acts, x_mean, x_std):
-        l2_loss = (x_reconstruct.float() - x.float()).pow(2).mean()
-        l1_norm = acts.float().abs().sum(-1).mean()
-        l1_loss = self.config["l1_coeff"] * l1_norm
-        l0_norm = (acts > 0).float().sum(-1).mean()
-        loss = l2_loss + l1_loss
-        num_dead_features = (
-                self.num_batches_not_active > self.config["n_batches_to_dead"]
-        ).sum()
-
         sae_out = self.postprocess_output(x_reconstruct, x_mean, x_std)
-        output = {
-            "sae_out": sae_out,
-            "feature_acts": acts,
-            "num_dead_features": num_dead_features,
-            "loss": loss,
-            "l1_loss": l1_loss,
-            "l2_loss": l2_loss,
-            "l0_norm": l0_norm,
-            "l1_norm": l1_norm,
-        }
-        return output
+        # output = self.get_loss_dict(x, x_reconstruct, acts, x_mean, x_std)
+        return sae_out, acts, SAEForwardTertiaryResults()
 
+    # def get_loss_dict(self, x, x_reconstruct, acts, x_mean, x_std):
+    #     l2_loss = (x_reconstruct.float() - x.float()).pow(2).mean()
+    #     l1_norm = acts.float().abs().sum(-1).mean()
+    #     l1_loss = self.config["l1_coeff"] * l1_norm
+    #     l0_norm = (acts > 0).float().sum(-1).mean()
+    #     loss = l2_loss + l1_loss
+    #     num_dead_features = (
+    #             self.num_batches_not_active > self.config["n_batches_to_dead"]
+    #     ).sum()
+    #
+    #     sae_out = self.postprocess_output(x_reconstruct, x_mean, x_std)
+    #     output = {
+    #         "sae_out": sae_out,
+    #         "feature_acts": acts,
+    #         "num_dead_features": num_dead_features,
+    #         "loss": loss,
+    #         "l1_loss": l1_loss,
+    #         "l2_loss": l2_loss,
+    #         "l0_norm": l0_norm,
+    #         "l1_norm": l1_norm,
+    #     }
+    #     return output
 
+# Commenting out JumpReLU code for now because it isn't in the scope of this experiment and won't be supported
+# (e.g. bandwidth config option) or tested
+"""
 class RectangleFunction(autograd.Function):
     @staticmethod
     def forward(ctx, x):
@@ -556,3 +605,4 @@ class JumpReLUSAE(BaseAutoencoder):
             "l1_norm": l0,
         }
         return output
+"""

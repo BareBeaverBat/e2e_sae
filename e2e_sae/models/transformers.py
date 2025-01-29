@@ -24,7 +24,7 @@ class SAETransformer(nn.Module):
 
     Args:
         tlens_model: The transformer model.
-        raw_sae_positions: A list of all the positions in the tlens_mdoel where SAEs are to be
+        raw_sae_positions: A list of all the positions in the tlens_model where SAEs are to be
             placed. These positions may have periods in them, which are replaced with hyphens in
             the keys of the `saes` attribute.
         dict_size_to_input_ratio: The ratio of the dictionary size to the input size for the SAEs.
@@ -36,7 +36,7 @@ class SAETransformer(nn.Module):
         self,
         tlens_model: HookedTransformer,
         raw_sae_positions: list[str],
-            # TODO add list of objects describing the SAE's to be created (initially only supporting list of length 1)
+        # TODO add list of objects describing the SAE's to be created (initially only supporting list of length 1)
         dict_size_to_input_ratio: float,
         init_decoder_orthogonal: bool = True,
     ):
@@ -124,6 +124,8 @@ class SAETransformer(nn.Module):
         new_acts: dict[str, SAEActs | CacheActs] = {}
 
         new_logits: Float[Tensor, "batch pos vocab"] | None = None
+        # todo need to revise this to use start_at_layer overload of HookedTransformer.forward(),
+        #  maybe only if it's told to use just one particular type of SAE
         if orig_acts is not None:
             # Just run the already-stored activations through the SAEs
             for sae_pos in sae_positions:
@@ -457,6 +459,7 @@ class SAETransformer(nn.Module):
             list(tlens_model.hook_dict.keys()), config["saes"]["sae_positions"]
         )
 
+        #TODO update this after changing constructor
         model = cls(
             tlens_model=tlens_model,
             raw_sae_positions=raw_sae_positions,

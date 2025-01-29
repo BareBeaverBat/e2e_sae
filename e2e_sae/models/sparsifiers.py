@@ -10,12 +10,6 @@ from torch import nn
 
 SAE_Type = Literal["Vanilla", "BatchTopK"]
 
-# TODO factory method returning BaseAutoEncoder
-# TODO modify return signature of forward() method in BaseAutoEncoder and children
-# TODO modify 'auxiliary loss' implementation(s) based on this:
-#  https://www.alignmentforum.org/posts/C5KAZQib3bzzpeyrg/progress-update-1-from-the-gdm-mech-interp-team-full-update#Improving_ghost_grads
-# TODO figure out how to incorporate ghost-grads-like auxiliary loss logic from sae_impls.py into losses.py/calc_loss()
-
 
 class SAE(nn.Module):
     """
@@ -46,11 +40,11 @@ class SAE(nn.Module):
             # Initialize so that there are n_dict_components orthonormal vectors
             self.decoder.weight.data = nn.init.orthogonal_(self.decoder.weight.data.T).T
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, None]:
         """Pass input through the encoder and normalized decoder."""
         c = self.encoder(x)
         x_hat = F.linear(c, self.dict_elements, bias=self.decoder.bias)
-        return x_hat, c
+        return x_hat, c, None
 
     @property
     def dict_elements(self):
@@ -82,7 +76,7 @@ class Codebook(nn.Module):
         self.input_size = input_size
         self.k = k
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, None]:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, None, None]:
         # Compute cosine similarity between input and codebook features (batch_size, dict_size)
         cos_sim = F.cosine_similarity(x.unsqueeze(1), self.codebook, dim=2)
 
@@ -92,7 +86,7 @@ class Codebook(nn.Module):
         # Sum the top k codebook features
         x_hat = torch.sum(self.codebook[topk], dim=1)  # (batch_size, input_size)
 
-        return x_hat, None
+        return x_hat, None, None
 
     @property
     def device(self):

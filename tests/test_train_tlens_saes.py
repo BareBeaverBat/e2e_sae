@@ -9,7 +9,7 @@ from e2e_sae.losses import (
     OutToInLoss,
     SparsityLoss,
 )
-from e2e_sae.scripts.train_tlens_saes.run_train_tlens_saes import Config, SAEsConfig
+from e2e_sae.scripts.train_tlens_saes.tlens_sae_train_config import SAEsConfig, Config
 from e2e_sae.scripts.train_tlens_saes.run_train_tlens_saes import main as run_training
 
 

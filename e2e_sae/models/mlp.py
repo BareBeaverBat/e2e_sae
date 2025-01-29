@@ -156,7 +156,7 @@ class MLPMod(nn.Module):
             x = self.layers[f"{i}"](x)
             outs[f"{i}"] = x
             if f"{i}" in self.sparsifiers:
-                x, c = self.sparsifiers[f"{i}"](x)
+                x, c, _ = self.sparsifiers[f"{i}"](x)
                 cs[f"{i}"] = c
                 sparsifiers_outs[f"{i}"] = x
         return outs, cs, sparsifiers_outs
