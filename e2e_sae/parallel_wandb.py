@@ -41,8 +41,14 @@ def new_wandb_process(config, log_queue, project, orig_base_run_name: str, run_n
 
     while True:
         try:
+
             # Wait up to 1 second for new data
-            log = log_queue.get(timeout=1)
+            try:
+                log = log_queue.get(timeout=1)
+            except RuntimeError as e:
+                logger.error(f"error while pulling item from log queue for run with suffix {run_name_suffix}",
+                             exc_info=e)
+                continue
 
             # Check for termination signal
             if log == "DONE":
@@ -77,10 +83,17 @@ class WandbWrapper:
             if isinstance(data_val, torch.Tensor):
                 logger.warning(f"tried to log a Tensor value: key={data_key}, val={data_val} (shape={data_val.shape}), "
                                f"fixing to primitive value or (possibly nested) list of primitives")
-                if len(data_val.shape) == 0:
-                    data_val = data_val.item()
-                else:
-                    data_val = data_val.tolist()
+                data_val = data_val.item() if len(data_val.shape) == 0 else data_val.tolist()
+            elif isinstance(data_val, list) and any(map(lambda x: isinstance(x, torch.Tensor), data_val)):
+                logger.warning(f"tried to log a list value that contained 1+ Tensor(s): key={data_key}, "
+                               f"val={data_val}, fixing relevant list entries to primitive values or (possibly nested) "
+                               f"lists of primitives")
+                data_val = [
+                    entry if not isinstance(entry, torch.Tensor)
+                    else (entry.item() if len(entry.shape) == 0 else entry.tolist())
+                    for entry in data_val
+                ]
+
             cleaned_data[data_key] = data_val
 
         payload = {'data': cleaned_data}
