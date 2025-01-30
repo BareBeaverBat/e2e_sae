@@ -14,7 +14,7 @@ log_every_n_grad_steps: 20
 collect_act_frequency_every_n_samples: 40_000
 act_frequency_n_tokens: 500_000
 batch_size: 6
-effective_batch_size: 16  # Number of samples before each optimizer step
+effective_batch_size: 18  # Number of samples before each optimizer step
 lr: 5e-4
 lr_schedule: cosine
 min_lr_factor: 0.1  # Minimum learning rate as a fraction of the initial learning rate
