@@ -308,9 +308,9 @@ def train(
             )
             or is_last_batch
         )
-        logger.info(f"starting {batch_idx}'th batch; is grad update step={is_grad_step}; is eval step={is_eval_step};"
-                    f"is collect_act_freq step={is_collect_act_frequency_step}; is log step={is_log_step};"
-                    f"is save model step={is_save_model_step}")
+        # logger.info(f"starting {batch_idx}'th batch; is grad update step={is_grad_step}; is eval step={is_eval_step};"
+        #             f"is collect_act_freq step={is_collect_act_frequency_step}; is log step={is_log_step};"
+        #             f"is save model step={is_save_model_step}")
 
         vram_tracker.check(f"before doing forward_raw() for {batch_idx}th batch of tokens")
         # Run through the raw transformer without SAEs
