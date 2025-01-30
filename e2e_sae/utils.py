@@ -360,7 +360,9 @@ class GPUMemTracker:
         if self.last_vram_free_percentage >= 0:
             delta = curr_vram_free_percentage - self.last_vram_free_percentage
             change_mag = abs(delta)
-            if change_mag > self.change_threshold:
+            vram_danger_threshold = 0.10
+            if (change_mag > self.change_threshold or (
+                    curr_vram_free_percentage < vram_danger_threshold < self.last_vram_free_percentage)):
                 logger.debug(f"between `{self.last_context}` and `{context}`, free-vram-% "
                              f"{'increased' if delta > 0 else 'decreased'} by {change_mag:.2%} "
                              f"to {curr_vram_free_percentage}")

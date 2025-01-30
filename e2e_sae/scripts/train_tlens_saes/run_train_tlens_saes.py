@@ -352,7 +352,7 @@ def train(
                 is_log_step=is_log_step,
             )
 
-            num_reconstructions_for_loss_calcs = ((len(sae_spec.matryoshka_group_proportions) + 1)
+            num_reconstructions_for_loss_calcs = (len(sae_spec.matryoshka_group_proportions)
                                                   if sae_spec.is_matryoshka else 1)
             overall_loss_divisor = n_gradient_accumulation_steps * num_reconstructions_for_loss_calcs
             overall_loss = loss / overall_loss_divisor
@@ -365,7 +365,7 @@ def train(
                 intermediate_recons = sae_cached_acts.tertiary_SAE_results.intermediate_reconstructions
 
                 for intermed_recon_idx, intermediate_reconstruct in enumerate(intermediate_recons):
-                    vram_tracker.check(f"before model.forward() for {intermed_recon_idx}th intermediate"
+                    vram_tracker.check(f"before model.forward() for {intermed_recon_idx}th intermediate "
                                        f"reconstruction for (matryoshka) sae variant {sae_spec_idx} on "
                                        f"{batch_idx}th batch of tokens")
                     logits_w_curr_intermed_recon, acts_w_curr_intermed_recon = model.forward(
@@ -374,7 +374,7 @@ def train(
                         inject_positions_activations={sae_raw_pos: intermediate_reconstruct}
                     )
 
-                    vram_tracker.check(f"before loss calculation for {intermed_recon_idx}th intermediate"
+                    vram_tracker.check(f"before loss calculation for {intermed_recon_idx}th intermediate "
                                        f"reconstruction for (matryoshka) sae variant {sae_spec_idx} on "
                                        f"{batch_idx}th batch of tokens")
                     loss_w_curr_intermed_recon, loss_dict_w_curr_intermed_recon = calc_loss(
@@ -502,7 +502,7 @@ def train(
             metrics = collect_act_frequency_metrics(
                 model=model,
                 data_config=config.train_data,
-                batch_size=config.batch_size // 2,  # Hack to prevent OOM. TODO: Solve this properly
+                batch_size=(config.batch_size // 2) or 1,  # Hack to prevent OOM. TODO: Solve this properly
                 global_seed=config.seed,
                 device=device,
                 n_tokens=config.act_frequency_n_tokens,

@@ -235,8 +235,11 @@ class GlobalBatchTopKMatryoshkaSAE(BaseAutoencoder):
             W_dec_slice = self.W_dec[start_idx:end_idx, :]
             acts_topk = all_acts_topk[..., start_idx:end_idx]
             x_reconstruct = acts_topk @ W_dec_slice + x_reconstruct
-            post_processed_x_recon = self.postprocess_output(x_reconstruct, x_mean, x_std)
-            intermediate_reconstructs.append(post_processed_x_recon)
+            if i < self.active_groups-1:
+                # the x_reconstruct produced by the final iteration of the loop is not an intermediate reconstruction
+                #  but rather the SAE's final reconstruction
+                post_processed_x_recon = self.postprocess_output(x_reconstruct, x_mean, x_std)
+                intermediate_reconstructs.append(post_processed_x_recon)
 
         self.update_inactive_features(all_acts_topk)
         ghost_grads_aux_loss = self.calc_ghost_grads_aux_loss(x, x_reconstruct, all_acts)
