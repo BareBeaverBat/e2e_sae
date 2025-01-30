@@ -1,6 +1,7 @@
 import math
+import urllib.parse
 from pathlib import Path
-from typing import Optional, Self, Annotated, Literal, Any, TypeVar
+from typing import Self, Annotated, Literal, Any, TypeVar
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, PositiveInt, model_validator, BeforeValidator, \
@@ -64,9 +65,10 @@ class SAESpecConfig(BaseModel):
         return self
 
     def to_run_name_suffix(self) -> str:
-        return (f"_sae_{self.type}{f'_matryoshka_{self.matryoshka_group_proportions}' if self.is_matryoshka else ''}"
-                f"_{self.dict_size_modifier}x-dict-size{f'_topK={self.top_k}' if self.top_k else ''}"
-                f"_ghost-grads_k-aux={self.k_aux}_aux-coeff={self.aux_coeff}")
+        return urllib.parse.quote(
+            f"_sae_{self.type}{f'_matryoshka_{self.matryoshka_group_proportions}' if self.is_matryoshka else ''}"
+            f"_{self.dict_size_modifier}x-dict-size{f'_topK={self.top_k}' if self.top_k else ''}"
+            f"_ghost-grads_k-aux={self.k_aux}_aux-coeff={self.aux_coeff}", safe='').replace(".", "_dot_")
 
 
 SAE_LIST_T = TypeVar('SAE_LIST_T', bound=list)

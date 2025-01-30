@@ -1,3 +1,4 @@
+import re
 from typing import cast
 
 import torch
@@ -75,7 +76,7 @@ class ActFrequencyMetrics:
         }
 
     def update_dict_el_frequencies(
-        self, new_acts: dict[str, SAEActs | CacheActs], batch_tokens: int
+        self, new_acts: dict[str, SAEActs | CacheActs], batch_tokens: int, sae_variant_idx: int
     ) -> None:
         """Update the dictionary element frequencies with the new batch frequencies.
 
@@ -83,6 +84,9 @@ class ActFrequencyMetrics:
             new_acts: Dictionary of activations for each hook position.
             batch_tokens: Number of tokens used to produce the sae acts.
         """
+        sae_idx_pattern_for_new_act_key = re.compile(f"-{sae_variant_idx}$")
+        new_acts = {(k if not isinstance(v, SAEActs) else re.sub(sae_idx_pattern_for_new_act_key, "", k)
+                     ): v for k, v in new_acts.items()}
         for sae_pos in self.dict_el_frequencies:
             new_acts_pos = new_acts[sae_pos]
             if isinstance(new_acts_pos, SAEActs):
@@ -161,12 +165,14 @@ class ActFrequencyMetrics:
 
 @torch.inference_mode()
 def calc_sparsity_metrics(
-    new_acts: dict[str, SAEActs | CacheActs], train: bool = True
+    new_acts: dict[str, SAEActs | CacheActs], sae_variant_idx: int, train: bool = True
 ) -> dict[str, float]:
     """Collect sparsity metrics for logging.
 
     Args:
         new_acts: Dictionary of activations for each hook position (may include SAE or cache acts).
+        sae_variant_idx: which variant of SAE (that's currently loaded in the transformer) these sparsity metrics are
+            evaluating
         train: Whether in train or evaluation mode. Only affects the keys of the metrics.
 
     Returns:
@@ -174,8 +180,10 @@ def calc_sparsity_metrics(
     """
     prefix = "sparsity/train" if train else "sparsity/eval"
     sparsity_metrics = {}
+    sae_idx_pattern_for_new_act_key = re.compile(f"-{sae_variant_idx}$")
     for name, new_act in new_acts.items():
         if isinstance(new_act, SAEActs):
+            name = re.sub(sae_idx_pattern_for_new_act_key, "", name)
             # Record L_0 norm of the cs
             l_0_norm = torch.norm(new_act.c, p=0, dim=-1).mean().item()
             sparsity_metrics[f"{prefix}/L_0/{name}"] = l_0_norm
@@ -276,7 +284,7 @@ def collect_act_frequency_metrics(
             should_run_to_logits=False
         )
         act_frequency_metrics.update_dict_el_frequencies(
-            new_acts, batch_tokens=tokens.shape[0] * tokens.shape[1]
+            new_acts, batch_tokens=tokens.shape[0] * tokens.shape[1], sae_variant_idx=sae_variant_idx
         )
     metrics = act_frequency_metrics.collect_for_logging(
         log_wandb_histogram=False, post_training=True

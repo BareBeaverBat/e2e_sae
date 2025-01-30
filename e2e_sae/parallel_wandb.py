@@ -30,14 +30,14 @@ def new_wandb_process(config, log_queue, project, orig_base_run_name: str, run_n
     run.name = run_name
     # Save the config to wandb
     with TemporaryDirectory() as tmp_dir:
-        config_path = Path(tmp_dir) / f"final_config_{quote(run_name_suffix, safe='')}.yaml"
+        config_path = Path(tmp_dir) / f"final_config{run_name_suffix}.yaml"
         with open(config_path, "w") as f:
             yaml.dump(config.model_dump(mode="json"), f, indent=2)
         wandb.save(str(config_path), policy="now", base_path=tmp_dir)
         # Unfortunately wandb.save is async, so we need to wait for it to finish before
         # continuing, and wandb python api provides no way to do this.
         # TODO: Find a better way to do this.
-        time.sleep(1)
+        time.sleep(5)
 
     while True:
         try:

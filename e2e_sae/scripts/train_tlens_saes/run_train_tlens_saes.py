@@ -4,6 +4,7 @@ Usage:
     python run_train_tlens_saes.py <path/to/config.yaml>
 """
 import math
+import re
 from datetime import datetime
 from pathlib import Path
 import multiprocessing as mp
@@ -166,7 +167,7 @@ def evaluate(
 
         # TODO in matryoshka case, add logic to compute eval metrics for the sub-dictionaries
 
-        sparsity_metrics = calc_sparsity_metrics(new_acts=new_acts, train=False)
+        sparsity_metrics = calc_sparsity_metrics(new_acts=new_acts, sae_variant_idx=sae_variant_idx, train=False)
         vram_tracker.check(f"before update metrics dict based on {batch_idx}th batch of eval data for "
                            f"SAE variant {sae_variant_idx}")
 
@@ -415,11 +416,12 @@ def train(
 
             if is_collect_act_frequency_step and act_frequency_metrics_trackers[sae_spec_idx] is None:
                 # Start collecting activation frequency metrics for next config.act_frequency_n_tokens
+                sae_idx_pattern_for_new_act_key = re.compile(f"-{sae_spec_idx}$")
                 act_frequency_metrics_trackers[sae_spec_idx] = ActFrequencyMetrics(
                     dict_sizes={
-                        hook_pos: new_act_pos.c.shape[-1]
-                        for hook_pos, new_act_pos in new_acts.items()
-                        if isinstance(new_act_pos, SAEActs)
+                        re.sub(sae_idx_pattern_for_new_act_key, "", hook_pos): new_act_tuple.c.shape[-1]
+                        for hook_pos, new_act_tuple in new_acts.items()
+                        if isinstance(new_act_tuple, SAEActs)
                     },
                     device=device,
                 )
@@ -427,7 +429,7 @@ def train(
 
             if act_frequency_metrics_trackers[sae_spec_idx] is not None:
                 act_frequency_metrics_trackers[sae_spec_idx].update_dict_el_frequencies(
-                    new_acts, batch_tokens=tokens.shape[0] * tokens.shape[1]
+                    new_acts, batch_tokens=tokens.shape[0] * tokens.shape[1], sae_variant_idx=sae_spec_idx
                 )
                 if act_frequency_metrics_trackers[sae_spec_idx].tokens_used >= config.act_frequency_n_tokens:
                     # TODO this might be a good spot to handle resampling of stubbornly dead latents
@@ -458,7 +460,7 @@ def train(
                     if grad_norm is not None:
                         log_info["grad_norm"] = grad_norm  # Norm of grad before clipping
 
-                    sparsity_metrics = calc_sparsity_metrics(new_acts=new_acts)
+                    sparsity_metrics = calc_sparsity_metrics(new_acts=new_acts, sae_variant_idx=sae_spec_idx)
                     log_info.update(sparsity_metrics)
 
                     if new_logits is not None:
@@ -584,22 +586,30 @@ def main(
     logger.info(f"Trainable parameters: {trainable_param_names}")
 
     vram_tracker.check("b4 call train()")
-    train(
-        config=config,
-        model=model,
-        train_loader=train_loader,
-        trainable_param_names=trainable_param_names,
-        device=device,
-        run_names=run_names,
-        wandb_wrapper=wandb_wrapper,
-        cache_positions=cache_positions,
-        vram_tracker=vram_tracker
-    )
+    try:
+        train(
+            config=config,
+            model=model,
+            train_loader=train_loader,
+            trainable_param_names=trainable_param_names,
+            device=device,
+            run_names=run_names,
+            wandb_wrapper=wandb_wrapper,
+            cache_positions=cache_positions,
+            vram_tracker=vram_tracker
+        )
+    except Exception as e:
+        logger.error(f"training failed with exception", exc_info=e)
+    except BaseException as be:
+        logger.error(f"training failed with system error", exc_info=be)
+
     if config.wandb_project:
+        logger.info(f"wrapping up wandb processes")
         for queue in wandb_log_queues:
             queue.put("DONE")
         for wandb_process in wandb_procs:
             wandb_process.join()
+        logger.info(f"wandb processes terminated, ending run")
 
 
 if __name__ == "__main__":
