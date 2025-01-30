@@ -5,8 +5,8 @@ from queue import Empty
 import multiprocessing as mp
 from tempfile import TemporaryDirectory
 from typing import Any, Literal, Optional
-from urllib.parse import quote
 
+import torch
 import wandb
 import yaml
 
@@ -71,7 +71,19 @@ class WandbWrapper:
 
     def log(self, sae_variant_idx: int, data: dict[str, Any], step: int | None = None):
         assert 0 <= sae_variant_idx < len(self.log_queues)
-        payload = {'data': data}
+        cleaned_data: dict[str, Any] = {}
+        for data_key in data.keys():
+            data_val = data[data_key]
+            if isinstance(data_val, torch.Tensor):
+                logger.warning(f"tried to log a Tensor value: key={data_key}, val={data_val} (shape={data_val.shape}), "
+                               f"fixing to primitive value or (possibly nested) list of primitives")
+                if len(data_val.shape) == 0:
+                    data_val = data_val.item()
+                else:
+                    data_val = data_val.tolist()
+            cleaned_data[data_key] = data_val
+
+        payload = {'data': cleaned_data}
         if step is not None:
             payload['step'] = step
         self.log_queues[sae_variant_idx].put(payload)
