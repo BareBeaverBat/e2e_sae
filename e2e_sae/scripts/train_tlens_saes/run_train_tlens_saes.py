@@ -253,7 +253,7 @@ def train(
     total_tokens = 0
     grad_updates = 0
     grad_norm: float | None = None
-    samples_since_act_frequency_collection: int = 0
+    samples_since_last_act_frequency_collection_start: int = 0
     act_frequency_metrics_trackers: list[ActFrequencyMetrics | None] = [None] * len(run_names)
 
     def save_checkpoint_of_sae_variant(total_samples_so_far: int, sae_variant_idx: int):
@@ -277,7 +277,7 @@ def train(
 
         total_samples += tokens.shape[0]
         total_tokens += tokens.shape[0] * tokens.shape[1]
-        samples_since_act_frequency_collection += tokens.shape[0]
+        samples_since_last_act_frequency_collection_start += tokens.shape[0]
 
         # Note that is_last_batch will always be False for iterable datasets with n_samples=None. In
         # that case, we will never know when the final batch is reached.
@@ -291,7 +291,7 @@ def train(
         is_collect_act_frequency_step: bool = config.collect_act_frequency_every_n_samples > 0 and (
             batch_idx == 0
             or (
-                samples_since_act_frequency_collection
+                samples_since_last_act_frequency_collection_start
                 >= config.collect_act_frequency_every_n_samples
             )
         )
@@ -425,7 +425,7 @@ def train(
                     },
                     device=device,
                 )
-                samples_since_act_frequency_collection = 0
+                samples_since_last_act_frequency_collection_start = 0
 
             if act_frequency_metrics_trackers[sae_spec_idx] is not None:
                 act_frequency_metrics_trackers[sae_spec_idx].update_dict_el_frequencies(
@@ -442,7 +442,6 @@ def train(
                         # TODO: Log when not using wandb too
                         wandb_wrapper.log(sae_spec_idx, metrics, step=total_samples)
                     act_frequency_metrics_trackers[sae_spec_idx] = None
-                    samples_since_act_frequency_collection = 0
 
             if is_log_step:
                 tqdm.write(
@@ -525,7 +524,7 @@ def main(
                  f"change threshold={vram_tracker.change_threshold}; actual device is {device}")
 
     base_run_name = get_run_name(config)
-    run_name_suffixes = [sae_spec.to_run_name_suffix() for sae_spec in config.saes.sae_specs]
+    run_name_suffixes = [f"_sae_variant_{sae_spec_idx}" for sae_spec_idx in range(len(config.saes.sae_specs))]
     run_names = [base_run_name + run_name_suffix for run_name_suffix in run_name_suffixes]
     logger.info(f"run names = \n" + "\n".join(run_names))
 

@@ -64,12 +64,6 @@ class SAESpecConfig(BaseModel):
                 raise ValueError(f"matryoshka_group_proportions should sum to 1: {self.matryoshka_group_proportions}")
         return self
 
-    def to_run_name_suffix(self) -> str:
-        return urllib.parse.quote(
-            f"_sae_{self.type}{f'_matryoshka_{self.matryoshka_group_proportions}' if self.is_matryoshka else ''}"
-            f"_{self.dict_size_modifier}x-dict-size{f'_topK={self.top_k}' if self.top_k else ''}"
-            f"_ghost-grads_k-aux={self.k_aux}_aux-coeff={self.aux_coeff}", safe='').replace(".", "_dot_")
-
 
 SAE_LIST_T = TypeVar('SAE_LIST_T', bound=list)
 
