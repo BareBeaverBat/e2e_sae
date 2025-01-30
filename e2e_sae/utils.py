@@ -346,29 +346,13 @@ def init_wandb(config: T, project: str) -> tuple[Run, T]:  #, sweep_config_path:
     return run, config
 
 
-class SingletonClass(object):
-    instance = None
+class GPUMemTracker:
 
-    def __new__(cls):
-        if cls.instance is None:
-            cls.instance = super(SingletonClass, cls).__new__(cls)
-        return cls.instance
-
-
-class GPUMemTracker(SingletonClass):
-
-    @classmethod
-    def initialize(cls,  device: str | int | torch.device, change_threshold: float) -> 'GPUMemTracker':
-        tracker_instance = cls()
-        tracker_instance.device = device
-        tracker_instance.change_threshold = change_threshold
-        return tracker_instance
-
-    def __init__(self):
+    def __init__(self, device: str | int | torch.device, change_threshold: float):
         self.last_vram_free_percentage = -1.0
         self.last_context: str = ""
-        self.device = "cpu"
-        self.change_threshold = 0.0  # how big a change must be to merit a log message
+        self.device = device
+        self.change_threshold = change_threshold  # how big a change must be to merit a log message
 
     def check(self, context: str):
         free_mem, total_mem = torch.cuda.mem_get_info(self.device)

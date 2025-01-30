@@ -51,7 +51,8 @@ def evaluate(
     device: torch.device,
     cache_positions: list[str] | None,
     log_resid_reconstruction: bool = True,
-    sae_variant_idx: int = 0
+    sae_variant_idx: int = 0,
+    vram_tracker: Optional[GPUMemTracker] = None
 ) -> dict[str, float]:
     """Evaluate the model on the eval dataset.
 
@@ -70,7 +71,6 @@ def evaluate(
     """
     model.saes.eval()
 
-    vram_tracker = GPUMemTracker()
 
     eval_config = config
     eval_cache_positions = cache_positions
@@ -192,10 +192,9 @@ def train(
     run_names: list[str],
     wandb_wrapper: Optional[WandbWrapper],
     cache_positions: list[str] | None = None,
+    vram_tracker: Optional[GPUMemTracker] = None
 ) -> None:
     model.saes.train()
-
-    vram_tracker = GPUMemTracker()
 
     is_local = config.loss.logits_kl is None and cache_positions is None
 
@@ -476,7 +475,7 @@ def train(
                         #  the evaluations of the different SAE variants
                         eval_metrics = evaluate(
                             config=config, model=model, device=device, cache_positions=cache_positions,
-                            sae_variant_idx=sae_spec_idx
+                            sae_variant_idx=sae_spec_idx, vram_tracker=vram_tracker
                         )
                         total_samples_at_last_eval = total_samples
                         log_info.update(eval_metrics)
@@ -519,7 +518,7 @@ def main(
     logger.info(f"device for run is {device}")
     config = load_config(config_path_or_obj, config_model=Config)
 
-    vram_tracker = GPUMemTracker.initialize(device, 0.05)
+    vram_tracker = GPUMemTracker(device, 0.05)
     logger.debug(f"initial vram_tracker instance has id {id(vram_tracker)}; device={vram_tracker.device}, and "
                  f"change threshold={vram_tracker.change_threshold}; actual device is {device}")
 
@@ -566,7 +565,7 @@ def main(
         tlens_model=tlens_model,
         raw_sae_positions=raw_sae_positions,
         saes_config=config.saes,
-        device=device
+        device=device, vram_tracker=vram_tracker
     ).to(device=device)
     vram_tracker.check("after moving SAETransformer to device")
 
@@ -593,7 +592,8 @@ def main(
         device=device,
         run_names=run_names,
         wandb_wrapper=wandb_wrapper,
-        cache_positions=cache_positions
+        cache_positions=cache_positions,
+        vram_tracker=vram_tracker
     )
     if config.wandb_project:
         for queue in wandb_log_queues:

@@ -42,10 +42,11 @@ class SAETransformer(nn.Module):
         raw_sae_positions: list[str],
         saes_config: SAEsConfig,
         init_decoder_orthogonal: bool = True,  # TODO either add support for this in sae_impls or delete it
-        device: str | int | torch.device | None = None
+        device: str | int | torch.device | None = None,
+        vram_tracker: Optional[GPUMemTracker] = None
     ):
         super().__init__()
-        vram_tracker = GPUMemTracker()
+
         logger.debug(f"vram_tracker instance in SAETransformer.__init__() has id {id(vram_tracker)}; "
                      f"device={vram_tracker.device}, and change threshold={vram_tracker.change_threshold};")
 
@@ -65,10 +66,12 @@ class SAETransformer(nn.Module):
                 sae_instance_key = SAETransformer.sae_raw_pos_to_sae_key(self.raw_sae_positions[i], sae_spec_idx)
                 sae_instantiation_conf = determine_SAE_instantiation_conf(
                     saes_config, sae_spec, input_size, device)
-                vram_tracker.check(f"b4 create {sae_spec_idx}th variant of SAE at {i}th position in "
-                                   f"transformer")
+                if vram_tracker:
+                    vram_tracker.check(f"b4 create {sae_spec_idx}th variant of SAE at {i}th position in "
+                                       f"transformer")
                 self.saes[sae_instance_key] = manufacture_SAE(sae_instantiation_conf)
-        vram_tracker.check("after finish creating SAE's in transformer")
+        if vram_tracker:
+            vram_tracker.check("after finish creating SAE's in transformer")
 
     @classmethod
     def sae_raw_pos_to_sae_key(cls, raw_sae_pos: str, sae_variant_idx: int) -> str:
