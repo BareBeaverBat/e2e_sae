@@ -29,7 +29,7 @@ def new_wandb_process(config, log_queue, project, orig_base_run_name: str, run_n
     run.name = run_name
     # Save the config to wandb
     with TemporaryDirectory() as tmp_dir:
-        config_path = Path(tmp_dir) / "final_config.yaml"
+        config_path = Path(tmp_dir) / f"final_config_{run_name_suffix}.yaml"
         with open(config_path, "w") as f:
             yaml.dump(config.model_dump(mode="json"), f, indent=2)
         wandb.save(str(config_path), policy="now", base_path=tmp_dir)

@@ -65,7 +65,9 @@ def cache_hook(
 def inject_hook(
         x: Float[torch.Tensor, "... dim"],
         hook: HookPoint | None,
-        replacement_x: Float[torch.Tensor, "... dim"]
+        replacement_x: Float[torch.Tensor, "... dim"],
+        hook_acts: dict[str, Any],
+        cached_acts_key: str,
 ) -> Float[torch.Tensor, "... dim"]:
     """Replaces the actual data flowing through the model at the given hook point with the provided alternative tensor
 
@@ -74,9 +76,12 @@ def inject_hook(
         hook: a handle describing where in the model this hook method has been applied
         replacement_x: a different tensor that should overwrite the existing internal model activations at the current
             position
+        hook_acts: a dict for storing internal activations of the model (including injected ones, for various reasons)
+        cached_acts_key: the key this hook function should use when storing (injected) activations in the dict
 
     Returns:
         The injected/replacement activations data
     """
+    hook_acts[cached_acts_key] = CacheActs(input=replacement_x)#TODO look more closely at this vs calc_loss function and whether this should instead be
     return replacement_x
 

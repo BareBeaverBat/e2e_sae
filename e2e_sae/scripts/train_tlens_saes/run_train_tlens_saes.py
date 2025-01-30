@@ -142,6 +142,7 @@ def evaluate(
             orig_logits=orig_logits,
             new_logits=new_logits,
             loss_configs=eval_config.loss,
+            sae_variant_idx=sae_variant_idx,
             is_log_step=True,
             train=False,
         )[1]
@@ -288,6 +289,9 @@ def train(
             )
             or is_last_batch
         )
+        logger.info(f"starting {batch_idx}'th batch; is grad update step={is_grad_step}; is eval step={is_eval_step};"
+                    f"is collect_act_freq step={is_collect_act_frequency_step}; is log step={is_log_step};"
+                    f"is save model step={is_save_model_step}")
 
         # Run through the raw transformer without SAEs
         orig_logits, orig_acts = model.forward_raw(
@@ -321,16 +325,17 @@ def train(
                 orig_logits=None if new_logits is None else safe_orig_logits,
                 new_logits=new_logits,
                 loss_configs=config.loss,
+                sae_variant_idx=sae_spec_idx,
                 is_log_step=is_log_step,
             )
 
             num_reconstructions_for_loss_calcs = ((len(sae_spec.matryoshka_group_proportions) + 1)
                                                   if sae_spec.is_matryoshka else 1)
             overall_loss_divisor = n_gradient_accumulation_steps * num_reconstructions_for_loss_calcs
-            loss = loss / overall_loss_divisor
-            loss.backward()
+            overall_loss = loss / overall_loss_divisor
 
-            overall_loss_val = loss.item()
+
+
 
             if sae_spec.is_matryoshka:
                 sae_raw_pos = model.raw_sae_positions[0]
@@ -338,10 +343,6 @@ def train(
                 sae_cached_acts = new_acts[curr_sae_cached_acts_key]
                 assert isinstance(sae_cached_acts, SAEActs)
                 intermediate_recons = sae_cached_acts.tertiary_SAE_results.intermediate_reconstructions
-
-                # preemptive troubleshooting todo remove if not needed
-                curr_sae = cast(BaseAutoencoder,
-                                model.saes[SAETransformer.sae_raw_pos_to_sae_key(sae_raw_pos, sae_spec_idx)])
 
                 for intermed_recon_idx, intermediate_reconstruct in enumerate(intermediate_recons):
                     logits_w_curr_intermed_recon, acts_w_curr_intermed_recon = model.forward(
@@ -353,28 +354,18 @@ def train(
                     loss_w_curr_intermed_recon, loss_dict_w_curr_intermed_recon = calc_loss(
                         orig_acts=orig_acts, new_acts=acts_w_curr_intermed_recon,
                         orig_logits=None if logits_w_curr_intermed_recon is None else safe_orig_logits,
-                        new_logits=logits_w_curr_intermed_recon, loss_configs=config.loss, is_log_step=is_log_step
+                        new_logits=logits_w_curr_intermed_recon, loss_configs=config.loss,
+                        sae_variant_idx=sae_spec_idx, is_log_step=is_log_step
                     )
 
-                    # preemptive troubleshooting todo remove if not needed
-                    prior_W_dec_grad = curr_sae.W_dec.grad.detach().clone()
-                    prior_W_enc_grad = curr_sae.W_enc.grad.detach().clone()
-
                     loss_w_curr_intermed_recon = loss_w_curr_intermed_recon / overall_loss_divisor
-                    loss_w_curr_intermed_recon.backward()
-                    overall_loss_val += loss_w_curr_intermed_recon.item()
-
-                    # preemptive troubleshooting todo remove if not needed
-                    W_enc_grad_change = (prior_W_enc_grad - curr_sae.W_enc.detach()).abs().sum().item()
-                    W_dec_grad_change = (prior_W_dec_grad - curr_sae.W_dec.detach()).abs().sum().item()
-                    if W_enc_grad_change < 1e-8 or W_dec_grad_change < 1e-8:
-                        logger.warning(f"the loss signal from intermediate reconstruction {intermed_recon_idx} "
-                                       f"did not propagate back to the gradients in both the W_enc and W_dec matrices"
-                                       f"of the matryoshka sae; W_enc_grad_change={W_enc_grad_change}; "
-                                       f"W_dec_grad_change={W_dec_grad_change}")
+                    overall_loss += loss_w_curr_intermed_recon
 
                     loss_dict.update({f"{k}/matryoshka{sae_spec.matryoshka_group_proportions[intermed_recon_idx]}": v
                                       for k, v in loss_dict_w_curr_intermed_recon.items()})
+
+            overall_loss.backward()
+            overall_loss_val = overall_loss.item()
 
             if is_grad_step:
                 if config.max_grad_norm is not None:
@@ -447,6 +438,9 @@ def train(
                         log_info.update(train_output_metrics)
 
                     if is_eval_step:
+                        # TODO investigate whether/how this evaluate step could be broken out of the for loop over SAE
+                        #  variants, so then evaluate() could share orig_acts (for a given batch of eval data) between
+                        #  the evaluations of the different SAE variants
                         eval_metrics = evaluate(
                             config=config, model=model, device=device, cache_positions=cache_positions,
                             sae_variant_idx=sae_spec_idx

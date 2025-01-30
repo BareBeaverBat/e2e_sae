@@ -1,3 +1,4 @@
+import re
 from typing import Annotated
 
 import einops
@@ -165,6 +166,7 @@ def calc_loss(
     orig_logits: Float[Tensor, "batch pos vocab"] | None,
     new_logits: Float[Tensor, "batch pos vocab"] | None,
     loss_configs: LossConfigs,
+    sae_variant_idx: int,
     is_log_step: bool = False,
     train: bool = True,
 ) -> tuple[Float[Tensor, ""], dict[str, Float[Tensor, ""]]]:
@@ -181,6 +183,8 @@ def calc_loss(
         orig_logits: Logits from non-SAE-augmented model.
         new_logits: Logits from SAE-augmented model.
         loss_configs: Config for the losses to be computed.
+        sae_variant_idx: the index of the SAE variant (among those loaded in the transformer) whose loss is being
+            calculated
         is_log_step: Whether to store additional loss information for logging.
         train: Whether in train or evaluation mode. Only affects the keys of the loss_dict.
 
@@ -188,6 +192,10 @@ def calc_loss(
         loss: Scalar tensor representing the loss.
         loss_dict: Dictionary of losses, keyed by loss type and name.
     """
+    sae_idx_pattern_for_new_act_key = re.compile(f"-{sae_variant_idx}$")
+    new_acts = {(k if not isinstance(v, SAEActs) else re.sub(sae_idx_pattern_for_new_act_key, "", k)
+                 ): v for k, v in new_acts.items()}
+
     assert set(orig_acts.keys()) == set(new_acts.keys()), (
         f"Keys of orig_acts and new_acts must match, got {orig_acts.keys()} and "
         f"{new_acts.keys()}"

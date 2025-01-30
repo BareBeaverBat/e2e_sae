@@ -174,25 +174,28 @@ class SAETransformer(nn.Module):
                 )
                 for sae_pos in sae_positions if sae_pos not in inject_positions_activations
             ]
+            cache_only_positions: list[str] = list(set(cache_positions or []) - set(sae_positions))
             cache_hooks = [
                 (cache_pos, partial(cache_hook, hook_acts=new_acts, hook_key=cache_pos))
-                for cache_pos in cache_positions or []
-                if cache_pos not in sae_positions
+                for cache_pos in cache_only_positions
             ]
             inject_hooks = [
-                (inject_pos, partial(inject_hook, replacement_x=inject_data)) for inject_pos, inject_data
-                in inject_positions_activations
+                (inject_pos, partial(inject_hook, replacement_x=inject_data, hook_acts=new_acts,
+                                     cached_acts_key=inject_pos)) for inject_pos, inject_data
+                in inject_positions_activations.items()
             ]
 
             block_num_pattern = re.compile(r"^blocks\.(\d+)\.")
 
+            hook_positions = sae_positions + cache_only_positions + list(inject_positions_activations.keys())
+
             if should_run_to_logits:
                 model_inputs: Float[Tensor, "batch ... d_vocab"] | Float[Tensor, "batch ... model_act_sz"] = tokens
                 first_layer_to_run: Optional[int] = None
-                earliest_sae_pos: str = sae_positions[0]  # for troubleshooting
+                earliest_pos: str = hook_positions[0] if hook_positions else "not_applicable"  # for troubleshooting
                 if orig_acts is not None:
                     first_layer_to_run = self.tlens_model.cfg.n_layers-1
-                    for sae_pos_hook_nm in sae_positions:
+                    for sae_pos_hook_nm in hook_positions:
                         if sae_pos_hook_nm in ["hook_embed", "hook_pos_embed", "hook_tokens"]:
                             first_layer_to_run = None
                             break
@@ -201,7 +204,7 @@ class SAETransformer(nn.Module):
                             curr_sae_layer = int(block_num_match.group(1))
                             if curr_sae_layer < first_layer_to_run:
                                 first_layer_to_run = curr_sae_layer
-                                earliest_sae_pos = sae_pos_hook_nm
+                                earliest_pos = sae_pos_hook_nm
                     if first_layer_to_run is not None:
                         needed_cached_act_key1 = get_act_name("resid_pre", first_layer_to_run)
                         needed_cached_act_key2 = get_act_name("resid_post", first_layer_to_run-1) if (
@@ -212,8 +215,8 @@ class SAETransformer(nn.Module):
                             model_inputs = orig_acts[needed_cached_act_key2]
                         else:
                             logger.info(f"Unable to skip computation for first {first_layer_to_run} layers because "
-                                        f"starting just before the earliest SAE position {earliest_sae_pos} requires "
-                                        f"cached activation of hook {needed_cached_act_key1} or "
+                                        f"starting just before the earliest needed hook position {earliest_pos} "
+                                        f"requires cached activation of hook {needed_cached_act_key1} or "
                                         f"{needed_cached_act_key2} but neither is available;\n"
                                         f"keys of available cached original activations={orig_acts.keys()}")
                             first_layer_to_run = None
@@ -229,7 +232,7 @@ class SAETransformer(nn.Module):
                 # in case SAEs only hooked into tokens, embeddings, or positional embeddings
                 first_layer_to_not_run: Optional[int] = 0
 
-                for sae_pos_hook_nm in sae_positions:
+                for sae_pos_hook_nm in hook_positions:
                     if sae_pos_hook_nm.startswith("ln_final"):
                         logger.warning(f"SAETransformer.forward() was asked to not run through to logits and yet"
                                        f"one of the SAE positions given was after the final layer; will return logits "

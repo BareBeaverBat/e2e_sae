@@ -53,7 +53,7 @@ def setup_logger(logfile: Path = DEFAULT_LOGFILE) -> logging.Logger:
                 "class": "logging.FileHandler",
                 "filename": str(logfile),
                 "formatter": "default",
-                "level": "WARNING",
+                "level": "INFO",
             },
         },
         "root": {
