@@ -110,9 +110,9 @@ class BaseAutoencoder(nn.Module):
         n_dead_latents: int = dead_latents_mask.int().sum().item()
         if n_dead_latents > 0:
             acts_topk_aux = torch.topk(
-                latent_acts[:, dead_latents_mask], min(self.config.ghost_grads_aux_k, n_dead_latents), dim=-1
+                latent_acts[..., dead_latents_mask], min(self.config.ghost_grads_aux_k, n_dead_latents), dim=-1
             )
-            acts_aux = torch.zeros_like(latent_acts[:, dead_latents_mask]).scatter(
+            acts_aux = torch.zeros_like(latent_acts[..., dead_latents_mask]).scatter(
                 -1, acts_topk_aux.indices, acts_topk_aux.values
             )
             x_reconstruct_aux = acts_aux @ self.W_dec[dead_latents_mask, :]
@@ -195,7 +195,7 @@ class GlobalBatchTopKMatryoshkaSAE(BaseAutoencoder):
         x_cent = x - self.b_dec
         _, result = self.compute_activations(x_cent)
         max_act_index = self.group_indices[self.active_groups]
-        result[:, max_act_index:] = 0
+        result[..., max_act_index:] = 0
         if len(original_shape) == 3:
             result = result.reshape(original_shape[0], original_shape[1], -1)
         return result
