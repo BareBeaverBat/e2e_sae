@@ -201,14 +201,15 @@ class Config(BaseModel):
 
 
 def determine_SAE_instantiation_conf(general_sae_configs: SAEsConfig, curr_sae_spec: SAESpecConfig,
-                                     curr_sae_model_act_size: int) -> SAEInstantiationConfig:
+                                     curr_sae_model_act_size: int, device: str | int | torch.device | None
+                                     ) -> SAEInstantiationConfig:
     curr_dict_size = int(curr_sae_model_act_size*general_sae_configs.dict_size_to_input_ratio
                          * curr_sae_spec.dict_size_modifier)
 
     instantiation_conf = SAEInstantiationConfig(
         curr_sae_model_act_size, curr_dict_size, curr_sae_spec.type, curr_sae_spec.is_matryoshka,
         n_batches_to_dead=general_sae_configs.n_batches_to_dead, ghost_grads_aux_k=curr_sae_spec.k_aux,
-        ghost_grads_aux_coeff=curr_sae_spec.aux_coeff, top_k=curr_sae_spec.top_k)
+        ghost_grads_aux_coeff=curr_sae_spec.aux_coeff, top_k=curr_sae_spec.top_k, device=device)
 
     if curr_sae_spec.is_matryoshka:
         instantiation_conf.matryoshka_group_sizes = distribute_to_integers(curr_sae_spec.matryoshka_group_proportions,

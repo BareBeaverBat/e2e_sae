@@ -523,7 +523,8 @@ def main(
     model = SAETransformer(
         tlens_model=tlens_model,
         raw_sae_positions=raw_sae_positions,
-        saes_config=config.saes
+        saes_config=config.saes,
+        device=device
     ).to(device=device)
 
     all_param_names = [name for name, _ in model.saes.named_parameters()]

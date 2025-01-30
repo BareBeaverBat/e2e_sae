@@ -42,6 +42,7 @@ class SAETransformer(nn.Module):
         raw_sae_positions: list[str],
         saes_config: SAEsConfig,
         init_decoder_orthogonal: bool = True,  # TODO either add support for this in sae_impls or delete it
+        device: str | int | torch.device | None = None
     ):
         super().__init__()
         self.tlens_model = tlens_model.eval()
@@ -59,7 +60,7 @@ class SAETransformer(nn.Module):
             for sae_spec_idx, sae_spec in enumerate(self.sae_specs):
                 sae_instance_key = SAETransformer.sae_raw_pos_to_sae_key(self.raw_sae_positions[i], sae_spec_idx)
                 sae_instantiation_conf = determine_SAE_instantiation_conf(
-                    saes_config, sae_spec, input_size)
+                    saes_config, sae_spec, input_size, device)
                 self.saes[sae_instance_key] = manufacture_SAE(sae_instantiation_conf)
 
     @classmethod
@@ -277,6 +278,7 @@ class SAETransformer(nn.Module):
         else:
             raise ValueError("Invalid arguments.")
 
+        logger.info(f"calling to() on saes: {self.saes.keys()}")
         self.saes.to(*args, **kwargs)
         return self
 

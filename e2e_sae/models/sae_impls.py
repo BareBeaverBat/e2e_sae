@@ -33,6 +33,8 @@ class SAEInstantiationConfig:
 
     input_unit_norm: bool = False
 
+    device: str | int | torch.device | None = None
+
 
 class BaseAutoencoder(nn.Module):
     """Base class for autoencoder models."""
@@ -56,7 +58,8 @@ class BaseAutoencoder(nn.Module):
         )
         self.W_dec.data[:] = self.W_enc.t().data
         self.W_dec.data[:] = self.W_dec / self.W_dec.norm(dim=-1, keepdim=True)
-        self.num_batches_not_active = torch.zeros((self.config.dict_size,))
+        self.num_batches_not_active = torch.zeros((self.config.dict_size,), device=cfg.device) \
+            if cfg.device is not None else torch.zeros((self.config.dict_size,))
 
     def to(self, *args, **kwargs):
         super().to(*args, **kwargs)
