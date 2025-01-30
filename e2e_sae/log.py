@@ -47,18 +47,18 @@ def setup_logger(logfile: Path = DEFAULT_LOGFILE) -> logging.Logger:
             "console": {
                 "class": "logging.StreamHandler",
                 "formatter": "default",
-                "level": "INFO",
+                "level": "WARN",
             },
             "file": {
                 "class": "logging.FileHandler",
                 "filename": str(logfile),
                 "formatter": "default",
-                "level": "INFO",
+                "level": "DEBUG",#TODO set back to INFO once Colab VRAM OOM mystery solved
             },
         },
         "root": {
             "handlers": ["console", "file"],
-            "level": "INFO",
+            "level": "DEBUG",#TODO set back to INFO once Colab VRAM OOM mystery solved
         },
     }
 

@@ -344,3 +344,9 @@ def init_wandb(config: T, project: str) -> tuple[Run, T]:  #, sweep_config_path:
     # Update the non-frozen keys in the wandb config (only relevant for sweeps)
     wandb.config.update(config.model_dump(mode="json"))
     return run, config
+
+def print_gpu_mem_details(context: str, device: str | int | torch.device):
+    free_mem, total_mem = torch.cuda.mem_get_info(device)
+    logger.debug(f"in context '{context}', {100.0*free_mem/total_mem:.2%} of VRAM is free;\n"
+                 f"memory summary: {torch.cuda.memory_summary(device)}\n"
+                 f"GPU processes: {torch.cuda.list_gpu_processes(device)}")

@@ -20,7 +20,7 @@ from e2e_sae.log import logger
 from e2e_sae.models.sae_impls import manufacture_SAE
 from e2e_sae.models.sparsifiers import SAE
 from e2e_sae.scripts.train_tlens_saes.tlens_sae_train_config import SAEsConfig, determine_SAE_instantiation_conf
-from e2e_sae.utils import filter_names, get_hook_shapes
+from e2e_sae.utils import filter_names, get_hook_shapes, print_gpu_mem_details
 
 
 class SAETransformer(nn.Module):
@@ -61,7 +61,10 @@ class SAETransformer(nn.Module):
                 sae_instance_key = SAETransformer.sae_raw_pos_to_sae_key(self.raw_sae_positions[i], sae_spec_idx)
                 sae_instantiation_conf = determine_SAE_instantiation_conf(
                     saes_config, sae_spec, input_size, device)
+                print_gpu_mem_details(f"b4 create {sae_spec_idx}th variant of SAE at {i}th position in "
+                                      f"transformer", device)
                 self.saes[sae_instance_key] = manufacture_SAE(sae_instantiation_conf)
+        print_gpu_mem_details("after finish creating SAE's in transformer", device)
 
     @classmethod
     def sae_raw_pos_to_sae_key(cls, raw_sae_pos: str, sae_variant_idx: int) -> str:

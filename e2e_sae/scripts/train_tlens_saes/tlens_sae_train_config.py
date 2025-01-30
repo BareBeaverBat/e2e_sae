@@ -69,7 +69,7 @@ class SAESpecConfig(BaseModel):
                 f"_ghost-grads_k-aux={self.k_aux}_aux-coeff={self.aux_coeff}")
 
 
-SAE_LIST_T = TypeVar('SAE_LIST_T')
+SAE_LIST_T = TypeVar('SAE_LIST_T', bound=list)
 
 
 class SAEsConfig(BaseModel):
