@@ -5,6 +5,7 @@ from queue import Empty
 import multiprocessing as mp
 from tempfile import TemporaryDirectory
 from typing import Any, Literal, Optional
+from urllib.parse import quote
 
 import wandb
 import yaml
@@ -29,7 +30,7 @@ def new_wandb_process(config, log_queue, project, orig_base_run_name: str, run_n
     run.name = run_name
     # Save the config to wandb
     with TemporaryDirectory() as tmp_dir:
-        config_path = Path(tmp_dir) / f"final_config_{run_name_suffix}.yaml"
+        config_path = Path(tmp_dir) / f"final_config_{quote(run_name_suffix, safe='')}.yaml"
         with open(config_path, "w") as f:
             yaml.dump(config.model_dump(mode="json"), f, indent=2)
         wandb.save(str(config_path), policy="now", base_path=tmp_dir)

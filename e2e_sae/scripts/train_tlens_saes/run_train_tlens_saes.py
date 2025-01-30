@@ -516,6 +516,7 @@ def main(
     config_path_or_obj: Path | str | Config  # , sweep_config_path: Path | str | None = None
 ) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info(f"device for run is {device}")
     config = load_config(config_path_or_obj, config_model=Config)
 
     vram_tracker = GPUMemTracker.initialize(device, 0.05)
@@ -525,6 +526,7 @@ def main(
     base_run_name = get_run_name(config)
     run_name_suffixes = [sae_spec.to_run_name_suffix() for sae_spec in config.saes.sae_specs]
     run_names = [base_run_name + run_name_suffix for run_name_suffix in run_name_suffixes]
+    logger.info(f"run names = \n" + "\n".join(run_names))
 
     wandb_log_queues: list[mp.Queue] = []
     wandb_procs: list[mp.Process] = []
