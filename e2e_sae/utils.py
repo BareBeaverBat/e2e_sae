@@ -345,8 +345,48 @@ def init_wandb(config: T, project: str) -> tuple[Run, T]:  #, sweep_config_path:
     wandb.config.update(config.model_dump(mode="json"))
     return run, config
 
+
+class SingletonClass(object):
+    instance = None
+
+    def __new__(cls):
+        if cls.instance is None:
+            cls.instance = super(SingletonClass, cls).__new__(cls)
+        return cls.instance
+
+
+class GPUMemTracker(SingletonClass):
+
+    @classmethod
+    def initialize(cls,  device: str | int | torch.device, change_threshold: float) -> 'GPUMemTracker':
+        tracker_instance = cls()
+        tracker_instance.device = device
+        tracker_instance.change_threshold = change_threshold
+        return tracker_instance
+
+    def __init__(self):
+        self.last_vram_free_percentage = -1.0
+        self.last_context: str = ""
+        self.device = "cpu"
+        self.change_threshold = 0.0  # how big a change must be to merit a log message
+
+    def check(self, context: str):
+        free_mem, total_mem = torch.cuda.mem_get_info(self.device)
+        curr_vram_free_percentage = free_mem/total_mem
+        if self.last_vram_free_percentage >= 0:
+            delta = curr_vram_free_percentage - self.last_vram_free_percentage
+            change_mag = abs(delta)
+            if change_mag > self.change_threshold:
+                logger.debug(f"between `{self.last_context}` and `{context}`, free-vram-% "
+                             f"{'increased' if delta > 0 else 'decreased'} by {change_mag:.2%} "
+                             f"to {curr_vram_free_percentage}")
+        self.last_vram_free_percentage = curr_vram_free_percentage
+        self.last_context = context
+
+
 def print_gpu_mem_details(context: str, device: str | int | torch.device):
     free_mem, total_mem = torch.cuda.mem_get_info(device)
-    logger.debug(f"in context '{context}', {100.0*free_mem/total_mem:.2%} of VRAM is free;\n"
-                 f"memory summary: {torch.cuda.memory_summary(device)}\n"
-                 f"GPU processes: {torch.cuda.list_gpu_processes(device)}")
+    logger.debug(f"in context '{context}', {free_mem/total_mem:.2%} of VRAM is free;"
+                 f"\nmemory summary: {torch.cuda.memory_summary(device)}\n"
+                 )
+    # f"GPU processes: {torch.cuda.list_gpu_processes(device)}" # can add this in if you install pynvml

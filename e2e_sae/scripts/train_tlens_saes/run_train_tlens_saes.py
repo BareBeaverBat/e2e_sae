@@ -29,7 +29,6 @@ from e2e_sae.metrics import (
     calc_sparsity_metrics,
     collect_act_frequency_metrics,
 )
-from e2e_sae.models.sae_impls import BaseAutoencoder
 from e2e_sae.models.transformers import SAETransformer
 from e2e_sae.parallel_wandb import WandbWrapper, create_wandb_procs_queues_wrappers
 from e2e_sae.scripts.train_tlens_saes.tlens_sae_train_config import Config, get_run_name
@@ -41,7 +40,7 @@ from e2e_sae.utils import (
     load_config,
     replace_pydantic_model,
     save_module,
-    set_seed, print_gpu_mem_details,
+    set_seed, GPUMemTracker,
 )
 
 
@@ -71,6 +70,8 @@ def evaluate(
     """
     model.saes.eval()
 
+    vram_tracker = GPUMemTracker()
+
     eval_config = config
     eval_cache_positions = cache_positions
     eval_loss_config_updates = {}
@@ -95,7 +96,7 @@ def evaluate(
         {"loss": eval_loss_config_updates, "seed": config.seed + 42},
     )
 
-    print_gpu_mem_details(f"before create data loader for evaluate() on SAE variant {sae_variant_idx}", device)
+    vram_tracker.check(f"before create data loader for evaluate() on SAE variant {sae_variant_idx}")
     assert eval_config.eval_data is not None, "No eval dataset specified in the config."
     eval_loader = create_data_loader(
         eval_config.eval_data, batch_size=eval_config.batch_size, global_seed=eval_config.seed
@@ -111,19 +112,18 @@ def evaluate(
     # Accumulate metrics over the entire eval dataset and later divide by the total number of tokens
     metrics: dict[str, float] = {}
 
-    print_gpu_mem_details(f"before start loop through batches of eval data for SAE variant {sae_variant_idx}",
-                          device)
+    vram_tracker.check(f"before start loop through batches of eval data for SAE variant {sae_variant_idx}")
     for batch_idx, batch in tqdm(enumerate(eval_loader), total=n_batches, desc="Eval Steps"):
         if n_batches is not None and batch_idx >= n_batches:
             break
 
-        print_gpu_mem_details(f"before move {batch_idx}th batch of eval data for SAE variant {sae_variant_idx} "
-                              f"to device", device)
+        vram_tracker.check(f"before move {batch_idx}th batch of eval data for SAE variant {sae_variant_idx} "
+                           f"to device")
         tokens = batch[eval_config.eval_data.column_name].to(device=device)
         n_tokens = tokens.shape[0] * tokens.shape[1]
         total_tokens += n_tokens
-        print_gpu_mem_details(f"before model.forward_raw() on {batch_idx}th batch of eval data for SAE variant "
-                              f"{sae_variant_idx}", device)
+        vram_tracker.check(f"before model.forward_raw() on {batch_idx}th batch of eval data for SAE variant "
+                           f"{sae_variant_idx}")
 
         # Run through the raw transformer without SAEs
         orig_logits, orig_acts = model.forward_raw(
@@ -132,8 +132,8 @@ def evaluate(
             final_layer=None,
             cache_positions=eval_cache_positions,
         )
-        print_gpu_mem_details(f"before model.forward() on {batch_idx}th batch of eval data for SAE variant "
-                              f"{sae_variant_idx}", device)
+        vram_tracker.check(f"before model.forward() on {batch_idx}th batch of eval data for SAE variant "
+                           f"{sae_variant_idx}")
         # Run through the SAE-augmented model
         new_logits, new_acts = model.forward(
             tokens=tokens,
@@ -144,8 +144,8 @@ def evaluate(
             should_run_to_logits=True
         )
         assert new_logits is not None, "new_logits should not be None during evaluation."
-        print_gpu_mem_details(f"before calc_loss() on {batch_idx}th batch of eval data for SAE variant "
-                              f"{sae_variant_idx}", device)
+        vram_tracker.check(f"before calc_loss() on {batch_idx}th batch of eval data for SAE variant "
+                           f"{sae_variant_idx}")
 
         raw_batch_loss_dict = calc_loss(
             orig_acts=orig_acts,
@@ -157,8 +157,8 @@ def evaluate(
             is_log_step=True,
             train=False,
         )[1]
-        print_gpu_mem_details(f"before calc output and sparsity metrics on {batch_idx}th batch of eval data for "
-                              f"SAE variant {sae_variant_idx}", device)
+        vram_tracker.check(f"before calc output and sparsity metrics on {batch_idx}th batch of eval data for "
+                           f"SAE variant {sae_variant_idx}")
         batch_loss_dict = {k: v.item() for k, v in raw_batch_loss_dict.items()}
         batch_output_metrics = calc_output_metrics(
             tokens=tokens, orig_logits=orig_logits, new_logits=new_logits, train=False
@@ -167,8 +167,8 @@ def evaluate(
         # TODO in matryoshka case, add logic to compute eval metrics for the sub-dictionaries
 
         sparsity_metrics = calc_sparsity_metrics(new_acts=new_acts, train=False)
-        print_gpu_mem_details(f"before update metrics dict based on {batch_idx}th batch of eval data for "
-                              f"SAE variant {sae_variant_idx}", device)
+        vram_tracker.check(f"before update metrics dict based on {batch_idx}th batch of eval data for "
+                           f"SAE variant {sae_variant_idx}")
 
         # Update the global metric dictionary
         for k, v in {**batch_loss_dict, **batch_output_metrics, **sparsity_metrics}.items():
@@ -195,9 +195,11 @@ def train(
 ) -> None:
     model.saes.train()
 
+    vram_tracker = GPUMemTracker()
+
     is_local = config.loss.logits_kl is None and cache_positions is None
 
-    print_gpu_mem_details("b4 specify trainable parameters and create optimizer in train()", device)
+    vram_tracker.check("b4 specify trainable parameters and create optimizer in train()")
     for name, param in model.named_parameters():
         if name.startswith("saes.") and name.split("saes.")[1] in trainable_param_names:
             param.requires_grad = True
@@ -270,7 +272,7 @@ def train(
                                base_path=curr_save_dir)
 
     for batch_idx, batch in tqdm(enumerate(train_loader), total=n_batches, desc="Steps"):
-        print_gpu_mem_details(f"before fetching {batch_idx}th batch of tokens and moving them to device", device)
+        vram_tracker.check(f"before fetching {batch_idx}th batch of tokens and moving them to device")
         tokens: Int[Tensor, "batch pos"] = batch[config.train_data.column_name].to(device=device)
 
         total_samples += tokens.shape[0]
@@ -310,7 +312,7 @@ def train(
                     f"is collect_act_freq step={is_collect_act_frequency_step}; is log step={is_log_step};"
                     f"is save model step={is_save_model_step}")
 
-        print_gpu_mem_details(f"before doing forward_raw() for {batch_idx}th batch of tokens", device)
+        vram_tracker.check(f"before doing forward_raw() for {batch_idx}th batch of tokens")
         # Run through the raw transformer without SAEs
         orig_logits, orig_acts = model.forward_raw(
             tokens=tokens,
@@ -327,8 +329,8 @@ def train(
             assert not is_local or not sae_spec.is_matryoshka, \
                 "this codebase's support for Matryoshka training of SAE's doesn't currently include myopic training"
 
-            print_gpu_mem_details(f"before running model.forward() for sae variant {sae_spec_idx} on "
-                                  f"{batch_idx}th batch of tokens", device)
+            vram_tracker.check(f"before running model.forward() for sae variant {sae_spec_idx} on "
+                               f"{batch_idx}th batch of tokens")
             # Run through the SAE-augmented model
             new_logits, new_acts = model.forward(
                 tokens=tokens,
@@ -339,8 +341,8 @@ def train(
                 should_run_to_logits=not is_local
             )
 
-            print_gpu_mem_details(f"before calculating losses for sae variant {sae_spec_idx} on "
-                                  f"{batch_idx}th batch of tokens", device)
+            vram_tracker.check(f"before calculating losses for sae variant {sae_spec_idx} on "
+                               f"{batch_idx}th batch of tokens")
             loss, loss_dict = calc_loss(
                 orig_acts=orig_acts,
                 new_acts=new_acts,
@@ -364,18 +366,18 @@ def train(
                 intermediate_recons = sae_cached_acts.tertiary_SAE_results.intermediate_reconstructions
 
                 for intermed_recon_idx, intermediate_reconstruct in enumerate(intermediate_recons):
-                    print_gpu_mem_details(f"before model.forward() for {intermed_recon_idx}th intermediate"
-                                          f"reconstruction for (matryoshka) sae variant {sae_spec_idx} on "
-                                          f"{batch_idx}th batch of tokens", device)
+                    vram_tracker.check(f"before model.forward() for {intermed_recon_idx}th intermediate"
+                                       f"reconstruction for (matryoshka) sae variant {sae_spec_idx} on "
+                                       f"{batch_idx}th batch of tokens")
                     logits_w_curr_intermed_recon, acts_w_curr_intermed_recon = model.forward(
                         tokens=tokens, sae_positions=[], cache_positions=cache_positions,
                         orig_acts=orig_acts, sae_variant_idx=sae_spec_idx, should_run_to_logits=not is_local,
                         inject_positions_activations={sae_raw_pos: intermediate_reconstruct}
                     )
 
-                    print_gpu_mem_details(f"before loss calculation for {intermed_recon_idx}th intermediate"
-                                          f"reconstruction for (matryoshka) sae variant {sae_spec_idx} on "
-                                          f"{batch_idx}th batch of tokens", device)
+                    vram_tracker.check(f"before loss calculation for {intermed_recon_idx}th intermediate"
+                                       f"reconstruction for (matryoshka) sae variant {sae_spec_idx} on "
+                                       f"{batch_idx}th batch of tokens")
                     loss_w_curr_intermed_recon, loss_dict_w_curr_intermed_recon = calc_loss(
                         orig_acts=orig_acts, new_acts=acts_w_curr_intermed_recon,
                         orig_logits=None if logits_w_curr_intermed_recon is None else safe_orig_logits,
@@ -389,12 +391,12 @@ def train(
                     loss_dict.update({f"{k}/matryoshka{sae_spec.matryoshka_group_proportions[intermed_recon_idx]}": v
                                       for k, v in loss_dict_w_curr_intermed_recon.items()})
 
-            print_gpu_mem_details(f"before loss.backward() for sae variant {sae_spec_idx} on "
-                                  f"{batch_idx}th batch of tokens", device)
+            vram_tracker.check(f"before loss.backward() for sae variant {sae_spec_idx} on "
+                               f"{batch_idx}th batch of tokens")
             overall_loss.backward()
             overall_loss_val = overall_loss.item()
-            print_gpu_mem_details(f"after loss.backward() for sae variant {sae_spec_idx} on "
-                                  f"{batch_idx}th batch of tokens", device)
+            vram_tracker.check(f"after loss.backward() for sae variant {sae_spec_idx} on "
+                               f"{batch_idx}th batch of tokens")
 
             if is_grad_step:
                 if config.max_grad_norm is not None:
@@ -409,8 +411,8 @@ def train(
                 optimizer.zero_grad()
                 grad_updates += 1
                 scheduler.step()
-                print_gpu_mem_details(f"after {grad_updates}th (1-based) grad update for "
-                                      f"sae variant {sae_spec_idx} (on {batch_idx}th batch of tokens)", device)
+                vram_tracker.check(f"after {grad_updates}th (1-based) grad update for "
+                                   f"sae variant {sae_spec_idx} (on {batch_idx}th batch of tokens)")
 
             if is_collect_act_frequency_step and act_frequency_metrics_trackers[sae_spec_idx] is None:
                 # Start collecting activation frequency metrics for next config.act_frequency_n_tokens
@@ -516,6 +518,8 @@ def main(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = load_config(config_path_or_obj, config_model=Config)
 
+    vram_tracker = GPUMemTracker.initialize(device, 0.05)
+
     base_run_name = get_run_name(config)
     run_name_suffixes = [sae_spec.to_run_name_suffix() for sae_spec in config.saes.sae_specs]
     run_names = [base_run_name + run_name_suffix for run_name_suffix in run_name_suffixes]
@@ -531,11 +535,11 @@ def main(
     set_seed(config.seed)
     logger.info(config)
 
-    print_gpu_mem_details("b4 train loader", device)
+    vram_tracker.check("b4 train loader")
     train_loader = create_data_loader(
         config.train_data, batch_size=config.batch_size, global_seed=config.seed
     )[0]
-    print_gpu_mem_details("b4 load TLens model", device)
+    vram_tracker.check("b4 load TLens model")
     tlens_model = load_tlens_model(
         tlens_model_name=config.tlens_model_name, tlens_model_path=config.tlens_model_path,
         tlens_model_dtype=config.tlens_model_dtype
@@ -553,14 +557,14 @@ def main(
             pos for pos in config.loss.in_to_orig.hook_positions if pos not in raw_sae_positions
         ]
 
-    print_gpu_mem_details("b4 create SAETransformer", device)
+    vram_tracker.check("b4 create SAETransformer")
     model = SAETransformer(
         tlens_model=tlens_model,
         raw_sae_positions=raw_sae_positions,
         saes_config=config.saes,
         device=device
     ).to(device=device)
-    print_gpu_mem_details("after moving SAETransformer to device", device)
+    vram_tracker.check("after moving SAETransformer to device")
 
     all_param_names = [name for name, _ in model.saes.named_parameters()]
     if config.saes.pretrained_sae_paths is not None:
@@ -576,7 +580,7 @@ def main(
     assert len(trainable_param_names) > 0, "No trainable parameters found."
     logger.info(f"Trainable parameters: {trainable_param_names}")
 
-    print_gpu_mem_details("b4 call train()", device)
+    vram_tracker.check("b4 call train()")
     train(
         config=config,
         model=model,

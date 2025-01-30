@@ -20,7 +20,7 @@ from e2e_sae.log import logger
 from e2e_sae.models.sae_impls import manufacture_SAE
 from e2e_sae.models.sparsifiers import SAE
 from e2e_sae.scripts.train_tlens_saes.tlens_sae_train_config import SAEsConfig, determine_SAE_instantiation_conf
-from e2e_sae.utils import filter_names, get_hook_shapes, print_gpu_mem_details
+from e2e_sae.utils import filter_names, get_hook_shapes, GPUMemTracker
 
 
 class SAETransformer(nn.Module):
@@ -45,6 +45,8 @@ class SAETransformer(nn.Module):
         device: str | int | torch.device | None = None
     ):
         super().__init__()
+        vram_tracker = GPUMemTracker()
+
         self.tlens_model = tlens_model.eval()
         self.raw_sae_positions = raw_sae_positions
         self.hook_shapes: dict[str, list[int]] = get_hook_shapes(
@@ -61,10 +63,10 @@ class SAETransformer(nn.Module):
                 sae_instance_key = SAETransformer.sae_raw_pos_to_sae_key(self.raw_sae_positions[i], sae_spec_idx)
                 sae_instantiation_conf = determine_SAE_instantiation_conf(
                     saes_config, sae_spec, input_size, device)
-                print_gpu_mem_details(f"b4 create {sae_spec_idx}th variant of SAE at {i}th position in "
-                                      f"transformer", device)
+                vram_tracker.check(f"b4 create {sae_spec_idx}th variant of SAE at {i}th position in "
+                                   f"transformer")
                 self.saes[sae_instance_key] = manufacture_SAE(sae_instantiation_conf)
-        print_gpu_mem_details("after finish creating SAE's in transformer", device)
+        vram_tracker.check("after finish creating SAE's in transformer")
 
     @classmethod
     def sae_raw_pos_to_sae_key(cls, raw_sae_pos: str, sae_variant_idx: int) -> str:
