@@ -1,4 +1,4 @@
-# Overwhelming majority of this file was copied from https://github.com/bartbussmann/matryoshka_sae/blob/main/sae.py
+# Large majority of this file was copied from https://github.com/bartbussmann/matryoshka_sae/blob/main/sae.py
 from dataclasses import dataclass
 from typing import Optional
 
@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from jaxtyping import Float
 from torch import Tensor
 
+from e2e_sae.log import logger
 from e2e_sae.models.sparsifiers import SAE_Type
 
 
@@ -59,7 +60,9 @@ class BaseAutoencoder(nn.Module):
 
     def to(self, *args, **kwargs):
         super().to(*args, **kwargs)
+        logger.info(f"applying `to()` method to self.num_batches_not_active with args {args} and kwargs {kwargs}")
         self.num_batches_not_active.to(*args, **kwargs)
+        return self
 
     def preprocess_input(self, x):
         if self.config.input_unit_norm:
@@ -87,6 +90,10 @@ class BaseAutoencoder(nn.Module):
     @torch.no_grad()
     def update_inactive_features(self, acts):
         latent_activations_over_batch: Float[Tensor, "n_latents"] = acts.sum(dim=tuple(range(acts.ndim - 1)))
+        if acts.device != self.num_batches_not_active.device:
+            logger.warning(f"device mismatch between SAE latent activations {acts.device} and SAE "
+                           f"num_batches_not_active {self.num_batches_not_active.device}, correcting")
+            self.num_batches_not_active.to(acts.device)
         self.num_batches_not_active += (latent_activations_over_batch < 1e-8).float()
         self.num_batches_not_active[latent_activations_over_batch > 1e-8] = 0
 
