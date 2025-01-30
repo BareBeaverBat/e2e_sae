@@ -519,6 +519,8 @@ def main(
     config = load_config(config_path_or_obj, config_model=Config)
 
     vram_tracker = GPUMemTracker.initialize(device, 0.05)
+    logger.debug(f"initial vram_tracker instance has id {id(vram_tracker)}; device={vram_tracker.device}, and "
+                 f"change threshold={vram_tracker.change_threshold}; actual device is {device}")
 
     base_run_name = get_run_name(config)
     run_name_suffixes = [sae_spec.to_run_name_suffix() for sae_spec in config.saes.sae_specs]
@@ -529,7 +531,7 @@ def main(
     wandb_wrapper: Optional[WandbWrapper] = None
 
     if config.wandb_project:
-        wandb_log_queues, wandb_procs, wandb_wrapper = create_wandb_procs_queues_wrappers(
+        wandb_procs, wandb_log_queues, wandb_wrapper = create_wandb_procs_queues_wrappers(
             config, base_run_name, run_name_suffixes)
 
     set_seed(config.seed)

@@ -46,6 +46,8 @@ class SAETransformer(nn.Module):
     ):
         super().__init__()
         vram_tracker = GPUMemTracker()
+        logger.debug(f"vram_tracker instance in SAETransformer.__init__() has id {id(vram_tracker)}; "
+                     f"device={vram_tracker.device}, and change threshold={vram_tracker.change_threshold};")
 
         self.tlens_model = tlens_model.eval()
         self.raw_sae_positions = raw_sae_positions
