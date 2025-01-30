@@ -211,9 +211,16 @@ def calc_loss(
         orig_act = orig_act.detach().clone()
         new_act = new_acts[name]
 
-        if (isinstance(new_act, SAEActs) and new_act.tertiary_SAE_results and
+        if (train and isinstance(new_act, SAEActs) and new_act.tertiary_SAE_results and
                 new_act.tertiary_SAE_results.ghost_grads_aux_loss is not None):
             ghost_grads_aux_loss = new_act.tertiary_SAE_results.ghost_grads_aux_loss
+            matryoshka_intermed_recons = new_act.tertiary_SAE_results.intermediate_reconstructions
+            if matryoshka_intermed_recons is not None:
+                # the loss term that is returned from this call will be divided by the number of loss terms for the
+                # current batch, but the losses for 'intermediate reconstruction'-based forward passes won't include
+                # a ghost grad aux loss because those passes will be skipping the SAE (just splicing an intermediate
+                # reconstruction tensor into the model where the SAE's output would have gone)
+                ghost_grads_aux_loss *= (1+len(matryoshka_intermed_recons))
             loss += ghost_grads_aux_loss
             loss_dict[f"{prefix}/ghost_grads_aux/{name}"] = ghost_grads_aux_loss
 

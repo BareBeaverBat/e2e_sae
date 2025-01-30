@@ -4,15 +4,13 @@ Usage:
     python run_train_tlens_saes.py <path/to/config.yaml>
 """
 import math
-import time
 from datetime import datetime
 from pathlib import Path
-from tempfile import TemporaryDirectory
+import multiprocessing as mp
+from typing import Optional, cast
 
 import fire
 import torch
-import wandb
-import yaml
 from datasets import IterableDataset
 from jaxtyping import Int
 from torch import Tensor
@@ -31,14 +29,15 @@ from e2e_sae.metrics import (
     calc_sparsity_metrics,
     collect_act_frequency_metrics,
 )
+from e2e_sae.models.sae_impls import BaseAutoencoder
 from e2e_sae.models.transformers import SAETransformer
+from e2e_sae.parallel_wandb import WandbWrapper, create_wandb_procs_queues_wrappers
 from e2e_sae.scripts.train_tlens_saes.tlens_sae_train_config import Config
 from e2e_sae.types import Samples
 from e2e_sae.utils import (
     filter_names,
     get_cosine_schedule_with_warmup,
     get_linear_lr_schedule,
-    init_wandb,
     load_config,
     replace_pydantic_model,
     save_module,
@@ -73,6 +72,7 @@ def evaluate(
     device: torch.device,
     cache_positions: list[str] | None,
     log_resid_reconstruction: bool = True,
+    sae_variant_idx: int = 0
 ) -> dict[str, float]:
     """Evaluate the model on the eval dataset.
 
@@ -85,6 +85,7 @@ def evaluate(
         cache_positions: The positions to cache activations at.
         log_resid_reconstruction: Whether to log the reconstruction loss and explained variance
             at hook_resid_post in all layers.
+        sae_variant_idx: which SAE variant (that's currently loaded in the model) to evaluate
     Returns:
         Dictionary of metrics.
     """
@@ -149,6 +150,9 @@ def evaluate(
             tokens=tokens,
             sae_positions=model.raw_sae_positions,
             cache_positions=eval_cache_positions,
+            orig_acts=orig_acts,  # more efficient to skip the computations for layers earlier than the first SAE pos
+            sae_variant_idx=sae_variant_idx,
+            should_run_to_logits=True
         )
         assert new_logits is not None, "new_logits should not be None during evaluation."
 
@@ -165,6 +169,8 @@ def evaluate(
         batch_output_metrics = calc_output_metrics(
             tokens=tokens, orig_logits=orig_logits, new_logits=new_logits, train=False
         )
+
+        # TODO in matryoshka case, add logic to compute eval metrics for the sub-dictionaries
 
         sparsity_metrics = calc_sparsity_metrics(new_acts=new_acts, train=False)
 
@@ -187,6 +193,8 @@ def train(
     train_loader: DataLoader[Samples],
     trainable_param_names: list[str],
     device: torch.device,
+    run_names: list[str],
+    wandb_wrapper: Optional[WandbWrapper],
     cache_positions: list[str] | None = None,
 ) -> None:
     model.saes.train()
@@ -235,13 +243,10 @@ def train(
         # We don't need to run through the whole model for local runs
         final_layer = max([int(name.split(".")[1]) for name in model.raw_sae_positions]) + 1
 
-    run_name = get_run_name(config)
-    if config.wandb_project:
-        assert wandb.run, "wandb.run must be initialized before calling train."
-        wandb.run.name = run_name
+
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    save_dir = config.save_dir / f"{run_name}_{timestamp}" if config.save_dir else None
+    save_dirs = [config.save_dir / f"{run_name}_{timestamp}" if config.save_dir else None for run_name in run_names]
 
     total_samples = 0
     total_samples_at_last_save = 0
@@ -250,7 +255,22 @@ def train(
     grad_updates = 0
     grad_norm: float | None = None
     samples_since_act_frequency_collection: int = 0
-    act_frequency_metrics: ActFrequencyMetrics | None = None
+    act_frequency_metrics_trackers: list[ActFrequencyMetrics | None] = [None] * len(run_names)
+
+    def save_checkpoint_of_sae_variant(total_samples_so_far: int, sae_variant_idx: int):
+        saes_backup_file_name = f"samples_{total_samples_so_far}.pt"
+        curr_save_dir = save_dirs[sae_variant_idx]
+        save_module(
+            config_dict=config.model_dump(mode="json"),
+            save_dir=curr_save_dir,
+            module=torch.nn.ModuleDict({sae_key: sae for sae_key, sae in model.saes.items()
+                                        if sae_key.endswith(f"-{sae_variant_idx}")}),
+            model_filename=saes_backup_file_name,
+            config_filename="final_config.yaml",
+        )
+        if wandb_wrapper:
+            wandb_wrapper.save(sae_variant_idx, str(curr_save_dir / saes_backup_file_name), policy="now",
+                               base_path=curr_save_dir)
 
     for batch_idx, batch in tqdm(enumerate(train_loader), total=n_batches, desc="Steps"):
         tokens: Int[Tensor, "batch pos"] = batch[config.train_data.column_name].to(device=device)
@@ -281,7 +301,7 @@ def train(
             or is_eval_step
             or is_last_batch
         )
-        is_save_model_step: bool = save_dir is not None and (
+        is_save_model_step: bool = save_dirs[0] is not None and (
             (
                 config.save_every_n_samples
                 and total_samples - total_samples_at_last_save >= config.save_every_n_samples
@@ -296,166 +316,212 @@ def train(
             final_layer=final_layer,
             cache_positions=cache_positions,
         )
-        # Run through the SAE-augmented model
-        new_logits, new_acts = model.forward(
-            tokens=tokens,
-            sae_positions=model.raw_sae_positions,
-            cache_positions=cache_positions,
-            orig_acts=None if not is_local else orig_acts,
-        )
+        safe_orig_logits = orig_logits.detach().clone()
 
-        loss, loss_dict = calc_loss(
-            orig_acts=orig_acts,
-            new_acts=new_acts,
-            orig_logits=None if new_logits is None else orig_logits.detach().clone(),
-            new_logits=new_logits,
-            loss_configs=config.loss,
-            is_log_step=is_log_step,
-        )
+        for sae_spec_idx, sae_spec in enumerate(model.sae_specs):
+            assert len(model.raw_sae_positions) == 1 or not sae_spec.is_matryoshka, \
+                ("code for Matryoshka training of SAE's with e2e and/or downstream-recon loss does not currently "
+                 "support multiple SAE positions in the model")
+            assert not is_local or not sae_spec.is_matryoshka, \
+                "this codebase's support for Matryoshka training of SAE's doesn't currently include myopic training"
 
-        loss = loss / n_gradient_accumulation_steps
-        loss.backward()
-
-        if is_grad_step:
-            if config.max_grad_norm is not None:
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    model.saes.parameters(), config.max_grad_norm
-                ).item()
-            #todo call .make_decoder_weights_and_grad_unit_norm() on SAE's
-            optimizer.step()
-            optimizer.zero_grad()
-            grad_updates += 1
-            scheduler.step()
-
-        if is_collect_act_frequency_step and act_frequency_metrics is None:
-            # Start collecting activation frequency metrics for next config.act_frequency_n_tokens
-            act_frequency_metrics = ActFrequencyMetrics(
-                dict_sizes={
-                    hook_pos: new_act_pos.c.shape[-1]
-                    for hook_pos, new_act_pos in new_acts.items()
-                    if isinstance(new_act_pos, SAEActs)
-                },
-                device=device,
+            # Run through the SAE-augmented model
+            new_logits, new_acts = model.forward(
+                tokens=tokens,
+                sae_positions=model.raw_sae_positions,
+                cache_positions=cache_positions,
+                orig_acts=orig_acts,
+                sae_variant_idx=sae_spec_idx,
+                should_run_to_logits=not is_local
             )
-            samples_since_act_frequency_collection = 0
 
-        if act_frequency_metrics is not None:
-            act_frequency_metrics.update_dict_el_frequencies(
-                new_acts, batch_tokens=tokens.shape[0] * tokens.shape[1]
+            loss, loss_dict = calc_loss(
+                orig_acts=orig_acts,
+                new_acts=new_acts,
+                orig_logits=None if new_logits is None else safe_orig_logits,
+                new_logits=new_logits,
+                loss_configs=config.loss,
+                is_log_step=is_log_step,
             )
-            if act_frequency_metrics.tokens_used >= config.act_frequency_n_tokens:
-                # Finished collecting activation frequency metrics
-                metrics = act_frequency_metrics.collect_for_logging(
-                    log_wandb_histogram=config.wandb_project is not None
+
+            num_reconstructions_for_loss_calcs = ((len(sae_spec.matryoshka_group_proportions) + 1)
+                                                  if sae_spec.is_matryoshka else 1)
+            overall_loss_divisor = n_gradient_accumulation_steps * num_reconstructions_for_loss_calcs
+            loss = loss / overall_loss_divisor
+            loss.backward()
+
+            overall_loss_val = loss.item()
+
+            if sae_spec.is_matryoshka:
+                sae_raw_pos = model.raw_sae_positions[0]
+                curr_sae_cached_acts_key = SAETransformer.sae_raw_pos_to_cached_acts_key(sae_raw_pos, sae_spec_idx)
+                sae_cached_acts = new_acts[curr_sae_cached_acts_key]
+                assert isinstance(sae_cached_acts, SAEActs)
+                intermediate_recons = sae_cached_acts.tertiary_SAE_results.intermediate_reconstructions
+
+                # preemptive troubleshooting todo remove if not needed
+                curr_sae = cast(BaseAutoencoder,
+                                model.saes[SAETransformer.sae_raw_pos_to_sae_key(sae_raw_pos, sae_spec_idx)])
+
+                for intermed_recon_idx, intermediate_reconstruct in enumerate(intermediate_recons):
+                    logits_w_curr_intermed_recon, acts_w_curr_intermed_recon = model.forward(
+                        tokens=tokens, sae_positions=[], cache_positions=cache_positions,
+                        orig_acts=orig_acts, sae_variant_idx=sae_spec_idx, should_run_to_logits=not is_local,
+                        inject_positions_activations={sae_raw_pos: intermediate_reconstruct}
+                    )
+
+                    loss_w_curr_intermed_recon, loss_dict_w_curr_intermed_recon = calc_loss(
+                        orig_acts=orig_acts, new_acts=acts_w_curr_intermed_recon,
+                        orig_logits=None if logits_w_curr_intermed_recon is None else safe_orig_logits,
+                        new_logits=logits_w_curr_intermed_recon, loss_configs=config.loss, is_log_step=is_log_step
+                    )
+
+                    # preemptive troubleshooting todo remove if not needed
+                    prior_W_dec_grad = curr_sae.W_dec.grad.detach().clone()
+                    prior_W_enc_grad = curr_sae.W_enc.grad.detach().clone()
+
+                    loss_w_curr_intermed_recon = loss_w_curr_intermed_recon / overall_loss_divisor
+                    loss_w_curr_intermed_recon.backward()
+                    overall_loss_val += loss_w_curr_intermed_recon.item()
+
+                    # preemptive troubleshooting todo remove if not needed
+                    W_enc_grad_change = (prior_W_enc_grad - curr_sae.W_enc.detach()).abs().sum().item()
+                    W_dec_grad_change = (prior_W_dec_grad - curr_sae.W_dec.detach()).abs().sum().item()
+                    if W_enc_grad_change < 1e-8 or W_dec_grad_change < 1e-8:
+                        logger.warning(f"the loss signal from intermediate reconstruction {intermed_recon_idx} "
+                                       f"did not propagate back to the gradients in both the W_enc and W_dec matrices"
+                                       f"of the matryoshka sae; W_enc_grad_change={W_enc_grad_change}; "
+                                       f"W_dec_grad_change={W_dec_grad_change}")
+
+                    loss_dict.update({f"{k}/matryoshka{sae_spec.matryoshka_group_proportions[intermed_recon_idx]}": v
+                                      for k, v in loss_dict_w_curr_intermed_recon.items()})
+
+            if is_grad_step:
+                if config.max_grad_norm is not None:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        model.saes.parameters(), config.max_grad_norm
+                    ).item()
+                for raw_sae_pos in model.raw_sae_positions:
+                    curr_sae = model.saes[SAETransformer.sae_raw_pos_to_sae_key(raw_sae_pos, sae_spec_idx)]
+                    if hasattr(curr_sae, 'make_decoder_weights_and_grad_unit_norm'):
+                        curr_sae.make_decoder_weights_and_grad_unit_norm()
+                optimizer.step()
+                optimizer.zero_grad()
+                grad_updates += 1
+                scheduler.step()
+
+            if is_collect_act_frequency_step and act_frequency_metrics_trackers[sae_spec_idx] is None:
+                # Start collecting activation frequency metrics for next config.act_frequency_n_tokens
+                act_frequency_metrics_trackers[sae_spec_idx] = ActFrequencyMetrics(
+                    dict_sizes={
+                        hook_pos: new_act_pos.c.shape[-1]
+                        for hook_pos, new_act_pos in new_acts.items()
+                        if isinstance(new_act_pos, SAEActs)
+                    },
+                    device=device,
                 )
-                metrics["total_tokens"] = total_tokens
-                if config.wandb_project:
-                    # TODO: Log when not using wandb too
-                    wandb.log(metrics, step=total_samples)
-                act_frequency_metrics = None
                 samples_since_act_frequency_collection = 0
 
-        if is_log_step:
-            tqdm.write(
-                f"Samples {total_samples} Batch_idx {batch_idx} GradUpdates {grad_updates} "
-                f"Loss {loss.item():.5f}"
-            )
-            if config.wandb_project:
-                log_info = {
-                    "loss": loss.item(),
-                    "grad_updates": grad_updates,
-                    "total_tokens": total_tokens,
-                    "lr": optimizer.param_groups[0]["lr"],
-                }
-                log_info.update({k: v.item() for k, v in loss_dict.items()})
-                if grad_norm is not None:
-                    log_info["grad_norm"] = grad_norm  # Norm of grad before clipping
-
-                sparsity_metrics = calc_sparsity_metrics(new_acts=new_acts)
-                log_info.update(sparsity_metrics)
-
-                if new_logits is not None:
-                    train_output_metrics = calc_output_metrics(
-                        tokens=tokens,
-                        orig_logits=orig_logits.detach().clone(),
-                        new_logits=new_logits.detach().clone(),
-                    )
-                    log_info.update(train_output_metrics)
-
-                if is_eval_step:
-                    eval_metrics = evaluate(
-                        config=config, model=model, device=device, cache_positions=cache_positions
-                    )
-                    total_samples_at_last_eval = total_samples
-                    log_info.update(eval_metrics)
-
-                wandb.log(log_info, step=total_samples)
-
-        if is_save_model_step:
-            assert save_dir is not None
-            total_samples_at_last_save = total_samples
-            save_module(
-                config_dict=config.model_dump(mode="json"),
-                save_dir=save_dir,
-                module=model.saes,
-                model_filename=f"samples_{total_samples}.pt",
-                config_filename="final_config.yaml",
-            )
-            if config.wandb_project:
-                wandb.save(
-                    str(save_dir / f"samples_{total_samples}.pt"), policy="now", base_path=save_dir
+            if act_frequency_metrics_trackers[sae_spec_idx] is not None:
+                act_frequency_metrics_trackers[sae_spec_idx].update_dict_el_frequencies(
+                    new_acts, batch_tokens=tokens.shape[0] * tokens.shape[1]
                 )
+                if act_frequency_metrics_trackers[sae_spec_idx].tokens_used >= config.act_frequency_n_tokens:
+                    # TODO this might be a good spot to handle resampling of stubbornly dead latents
+                    # Finished collecting activation frequency metrics
+                    metrics = act_frequency_metrics_trackers[sae_spec_idx].collect_for_logging(
+                        log_wandb_histogram=config.wandb_project is not None
+                    )
+                    metrics["total_tokens"] = total_tokens
+                    if wandb_wrapper:
+                        # TODO: Log when not using wandb too
+                        wandb_wrapper.log(sae_spec_idx, metrics, step=total_samples)
+                    act_frequency_metrics_trackers[sae_spec_idx] = None
+                    samples_since_act_frequency_collection = 0
+
+            if is_log_step:
+                tqdm.write(
+                    f"Samples {total_samples} Batch_idx {batch_idx} GradUpdates {grad_updates} "
+                    f"Loss {overall_loss_val:.5f}"
+                )
+                if wandb_wrapper:
+                    log_info = {
+                        "loss": overall_loss_val,
+                        "grad_updates": grad_updates,
+                        "total_tokens": total_tokens,
+                        "lr": optimizer.param_groups[0]["lr"],
+                    }
+                    log_info.update({k: v.item() for k, v in loss_dict.items()})
+                    if grad_norm is not None:
+                        log_info["grad_norm"] = grad_norm  # Norm of grad before clipping
+
+                    sparsity_metrics = calc_sparsity_metrics(new_acts=new_acts)
+                    log_info.update(sparsity_metrics)
+
+                    if new_logits is not None:
+                        train_output_metrics = calc_output_metrics(
+                            tokens=tokens,
+                            orig_logits=orig_logits.detach().clone(),
+                            new_logits=new_logits.detach().clone(),
+                        )
+                        log_info.update(train_output_metrics)
+
+                    if is_eval_step:
+                        eval_metrics = evaluate(
+                            config=config, model=model, device=device, cache_positions=cache_positions,
+                            sae_variant_idx=sae_spec_idx
+                        )
+                        total_samples_at_last_eval = total_samples
+                        log_info.update(eval_metrics)
+
+                    wandb_wrapper.log(sae_spec_idx, log_info, step=total_samples)
+
+            if is_save_model_step:
+                assert save_dirs[sae_spec_idx] is not None
+                total_samples_at_last_save = total_samples
+                save_checkpoint_of_sae_variant(total_samples, sae_spec_idx)
 
         if is_last_batch:
             break
 
     # If the model wasn't saved at the last step of training (which may happen if n_samples: null
     # and the dataset is an IterableDataset), save it now.
-    if save_dir and not (save_dir / f"samples_{total_samples}.pt").exists():
-        save_module(
-            config_dict=config.model_dump(mode="json"),
-            save_dir=save_dir,
-            module=model.saes,
-            model_filename=f"samples_{total_samples}.pt",
-            config_filename="final_config.yaml",
-        )
-        if config.wandb_project:
-            wandb.save(
-                str(save_dir / f"samples_{total_samples}.pt"), policy="now", base_path=save_dir
-            )
+    if save_dirs[0] and not (save_dirs[0] / f"samples_{total_samples}_sae_variant_0.pt").exists():
+        for sae_spec_idx in range(len(model.sae_specs)):
+            save_checkpoint_of_sae_variant(total_samples, sae_spec_idx)
 
-    if config.wandb_project:
-        # Collect and log final activation frequency metrics
-        metrics = collect_act_frequency_metrics(
-            model=model,
-            data_config=config.train_data,
-            batch_size=config.batch_size // 2,  # Hack to prevent OOM. TODO: Solve this properly
-            global_seed=config.seed,
-            device=device,
-            n_tokens=config.act_frequency_n_tokens,
-        )
-        wandb.log(metrics)
-        wandb.finish()
+    if wandb_wrapper:
+        for sae_spec_idx in range(len(model.sae_specs)):
+            # Collect and log final activation frequency metrics
+            metrics = collect_act_frequency_metrics(
+                model=model,
+                data_config=config.train_data,
+                batch_size=config.batch_size // 2,  # Hack to prevent OOM. TODO: Solve this properly
+                global_seed=config.seed,
+                device=device,
+                n_tokens=config.act_frequency_n_tokens,
+                sae_variant_idx=sae_spec_idx
+            )
+            wandb_wrapper.log(sae_spec_idx, metrics)
 
 
 def main(
-    config_path_or_obj: Path | str | Config, sweep_config_path: Path | str | None = None
+    config_path_or_obj: Path | str | Config  # , sweep_config_path: Path | str | None = None
 ) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = load_config(config_path_or_obj, config_model=Config)
 
+    base_run_name = get_run_name(config)
+    run_name_suffixes = [sae_spec.to_run_name_suffix() for sae_spec in config.saes.sae_specs]
+    run_names = [base_run_name + run_name_suffix for run_name_suffix in run_name_suffixes]
+
+    wandb_log_queues: list[mp.Queue] = []
+    wandb_procs: list[mp.Process] = []
+    wandb_wrapper: Optional[WandbWrapper] = None
+
     if config.wandb_project:
-        config = init_wandb(config, config.wandb_project, sweep_config_path)
-        # Save the config to wandb
-        with TemporaryDirectory() as tmp_dir:
-            config_path = Path(tmp_dir) / "final_config.yaml"
-            with open(config_path, "w") as f:
-                yaml.dump(config.model_dump(mode="json"), f, indent=2)
-            wandb.save(str(config_path), policy="now", base_path=tmp_dir)
-            # Unfortunately wandb.save is async, so we need to wait for it to finish before
-            # continuing, and wandb python api provides no way to do this.
-            # TODO: Find a better way to do this.
-            time.sleep(1)
+        wandb_log_queues, wandb_procs, wandb_wrapper = create_wandb_procs_queues_wrappers(
+            config, base_run_name, run_name_suffixes)
 
     set_seed(config.seed)
     logger.info(config)
@@ -465,7 +531,7 @@ def main(
     )[0]
     tlens_model = load_tlens_model(
         tlens_model_name=config.tlens_model_name, tlens_model_path=config.tlens_model_path,
-        tlens_model_dtype=config["tlens_model_dtype"]
+        tlens_model_dtype=config.tlens_model_dtype
     )
 
     raw_sae_positions = filter_names(list(tlens_model.hook_dict.keys()), config.saes.sae_positions)
@@ -499,14 +565,22 @@ def main(
 
     assert len(trainable_param_names) > 0, "No trainable parameters found."
     logger.info(f"Trainable parameters: {trainable_param_names}")
+
     train(
         config=config,
         model=model,
         train_loader=train_loader,
         trainable_param_names=trainable_param_names,
         device=device,
-        cache_positions=cache_positions,
+        run_names=run_names,
+        wandb_wrapper=wandb_wrapper,
+        cache_positions=cache_positions
     )
+    if config.wandb_project:
+        for queue in wandb_log_queues:
+            queue.put("DONE")
+        for wandb_process in wandb_procs:
+            wandb_process.join()
 
 
 if __name__ == "__main__":

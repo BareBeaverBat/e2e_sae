@@ -61,3 +61,22 @@ def cache_hook(
     """
     hook_acts[hook_key] = CacheActs(input=x)
     return x
+
+def inject_hook(
+        x: Float[torch.Tensor, "... dim"],
+        hook: HookPoint | None,
+        replacement_x: Float[torch.Tensor, "... dim"]
+) -> Float[torch.Tensor, "... dim"]:
+    """Replaces the actual data flowing through the model at the given hook point with the provided alternative tensor
+
+    Args:
+        x: the model-generated internal activations at the current hook position
+        hook: a handle describing where in the model this hook method has been applied
+        replacement_x: a different tensor that should overwrite the existing internal model activations at the current
+            position
+
+    Returns:
+        The injected/replacement activations data
+    """
+    return replacement_x
+

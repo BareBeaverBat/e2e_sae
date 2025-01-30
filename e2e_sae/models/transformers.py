@@ -2,7 +2,7 @@ import os
 import re
 from functools import partial
 from pathlib import Path
-from typing import Any, Literal, cast, Optional, Callable
+from typing import Any, Literal, cast, Optional
 
 import torch
 import tqdm
@@ -14,7 +14,7 @@ from transformer_lens import HookedTransformer
 from transformer_lens.utils import LocallyOverridenDefaults, sample_logits, get_act_name
 from wandb.apis.public import Run
 
-from e2e_sae.hooks import CacheActs, SAEActs, cache_hook, sae_hook
+from e2e_sae.hooks import CacheActs, SAEActs, cache_hook, sae_hook, inject_hook
 from e2e_sae.loader import load_tlens_model
 from e2e_sae.log import logger
 from e2e_sae.models.sae_impls import manufacture_SAE
@@ -31,7 +31,7 @@ class SAETransformer(nn.Module):
         raw_sae_positions: A list of all the positions in the tlens_model where SAEs are to be
             placed. These positions may have periods in them, which are replaced with hyphens in
             the keys of the `saes` attribute.
-        dict_size_to_input_ratio: The ratio of the dictionary size to the input size for the SAEs.
+        saes_config: information about the SAE(s) to insert into the transformer
         init_decoder_orthogonal: Whether to initialize the decoder weights of the SAEs to be
             orthonormal. Not needed when e.g. loading pretrained SAEs. Defaults to True.
     """
@@ -54,13 +54,21 @@ class SAETransformer(nn.Module):
         self.sae_specs = saes_config.sae_specs
 
         self.saes = nn.ModuleDict()
-        for i in range(len(self.all_sae_positions)):
+        for i in range(len(self.raw_sae_positions)):
             input_size = self.hook_shapes[self.raw_sae_positions[i]][-1]
             for sae_spec_idx, sae_spec in enumerate(self.sae_specs):
-                sae_instance_key = f"{self.all_sae_positions[i]}-{sae_spec_idx}"
+                sae_instance_key = SAETransformer.sae_raw_pos_to_sae_key(self.raw_sae_positions[i], sae_spec_idx)
                 sae_instantiation_conf = determine_SAE_instantiation_conf(
                     saes_config, sae_spec, input_size)
                 self.saes[sae_instance_key] = manufacture_SAE(sae_instantiation_conf)
+
+    @classmethod
+    def sae_raw_pos_to_sae_key(cls, raw_sae_pos: str, sae_variant_idx: int) -> str:
+        return f"{raw_sae_pos.replace('.', '-')}-{sae_variant_idx}"
+
+    @classmethod
+    def sae_raw_pos_to_cached_acts_key(cls, raw_sae_pos: str, sae_variant_idx: int) -> str:
+        return f"{raw_sae_pos}-{sae_variant_idx}"
 
     def forward_raw(
         self,
@@ -103,7 +111,8 @@ class SAETransformer(nn.Module):
         cache_positions: list[str] | None = None,
         orig_acts: dict[str, Float[Tensor, "batch pos dim"]] | None = None,
         sae_variant_idx: int = 0,
-        should_run_to_logits: Optional[bool] = None
+        should_run_to_logits: Optional[bool] = None,
+        inject_positions_activations: Optional[dict[str, Float[Tensor, "batch pos dim"]]] = None
     ) -> tuple[Float[torch.Tensor, "batch pos d_vocab"] | None, dict[str, SAEActs | CacheActs]]:
         """Forward pass through the SAE-augmented model.
 
@@ -121,6 +130,8 @@ class SAETransformer(nn.Module):
             sae_variant_idx: index of the SAE spec to use at each SAE position
             should_run_to_logits: whether the forward pass through the model should proceed past the layer of the
                 last SAE
+            inject_positions_activations: hook names and model activation tensors which should be injected into the
+                model's forward pass at those hooks' locations
 
         Returns:
             - The logits of the SAE-augmented model. If should_run_thru_last_layer is true, this will be None
@@ -129,22 +140,25 @@ class SAETransformer(nn.Module):
         """
         if should_run_to_logits is None:  # backwards compatibility
             should_run_to_logits = orig_acts is None
+        if inject_positions_activations is None:
+            inject_positions_activations = {}
+        elif len(inject_positions_activations) > 0 and orig_acts is not None and not should_run_to_logits:
+            logger.warning(f"injection hooks were specified for SAETransformer.forward() but will not be used")
 
         # sae_acts and cache_acts will be written into by sae_hook and cache_hook
         new_acts: dict[str, SAEActs | CacheActs] = {}
 
         new_logits: Float[Tensor, "batch pos vocab"] | None = None
 
-        sae_pos_to_key: Callable[[str], str] = lambda pos: f"{pos.replace('.', '-')}-{sae_variant_idx}"
         if orig_acts is not None and not should_run_to_logits:
             # Just run the already-stored activations through the SAEs
             for sae_pos in sae_positions:
                 sae_hook(
                     x=orig_acts[sae_pos].detach().clone(),
                     hook=None,
-                    sae=self.saes[sae_pos_to_key(sae_pos)],
+                    sae=self.saes[SAETransformer.sae_raw_pos_to_sae_key(sae_pos, sae_variant_idx)],
                     hook_acts=new_acts,
-                    hook_key=sae_pos,
+                    hook_key=SAETransformer.sae_raw_pos_to_cached_acts_key(sae_pos, sae_variant_idx),
                 )
         else:
             # Run the tokens through the whole SAE-augmented model
@@ -153,17 +167,21 @@ class SAETransformer(nn.Module):
                     sae_pos,
                     partial(
                         sae_hook,
-                        sae=cast(SAE, self.saes[sae_pos_to_key(sae_pos)]),
+                        sae=cast(SAE, self.saes[SAETransformer.sae_raw_pos_to_sae_key(sae_pos, sae_variant_idx)]),
                         hook_acts=new_acts,
-                        hook_key=sae_pos,
+                        hook_key=SAETransformer.sae_raw_pos_to_cached_acts_key(sae_pos, sae_variant_idx),
                     ),
                 )
-                for sae_pos in sae_positions
+                for sae_pos in sae_positions if sae_pos not in inject_positions_activations
             ]
             cache_hooks = [
                 (cache_pos, partial(cache_hook, hook_acts=new_acts, hook_key=cache_pos))
                 for cache_pos in cache_positions or []
                 if cache_pos not in sae_positions
+            ]
+            inject_hooks = [
+                (inject_pos, partial(inject_hook, replacement_x=inject_data)) for inject_pos, inject_data
+                in inject_positions_activations
             ]
 
             block_num_pattern = re.compile(r"^block\.(\d+)\.")
@@ -185,19 +203,24 @@ class SAETransformer(nn.Module):
                                 first_layer_to_run = curr_sae_layer
                                 earliest_sae_pos = sae_pos_hook_nm
                     if first_layer_to_run is not None:
-                        needed_cached_act_key = get_act_name("resid_pre", first_layer_to_run)
-                        if needed_cached_act_key in orig_acts:
-                            model_inputs = orig_acts[needed_cached_act_key]
+                        needed_cached_act_key1 = get_act_name("resid_pre", first_layer_to_run)
+                        needed_cached_act_key2 = get_act_name("resid_post", first_layer_to_run-1) if (
+                                first_layer_to_run > 0) else "not_applicable"
+                        if needed_cached_act_key1 in orig_acts:
+                            model_inputs = orig_acts[needed_cached_act_key1]
+                        elif needed_cached_act_key2 in orig_acts:
+                            model_inputs = orig_acts[needed_cached_act_key2]
                         else:
                             logger.info(f"Unable to skip computation for first {first_layer_to_run} layers because "
                                         f"starting just before the earliest SAE position {earliest_sae_pos} requires "
-                                        f"cached activation of hook {needed_cached_act_key} but that isn't available;\n"
+                                        f"cached activation of hook {needed_cached_act_key1} or "
+                                        f"{needed_cached_act_key2} but neither is available;\n"
                                         f"keys of available cached original activations={orig_acts.keys()}")
                             first_layer_to_run = None
 
                 new_logits = self.tlens_model.run_with_hooks(
                     model_inputs,
-                    fwd_hooks=sae_hooks + cache_hooks,  # type: ignore
+                    fwd_hooks=sae_hooks + cache_hooks + inject_hooks,  # type: ignore
                     start_at_layer=first_layer_to_run
                 )
             else:
@@ -220,7 +243,7 @@ class SAETransformer(nn.Module):
                             first_layer_to_not_run = curr_sae_layer+1
                 new_logits = self.tlens_model.run_with_hooks(
                     tokens,
-                    fwd_hooks=sae_hooks + cache_hooks,  # type: ignore
+                    fwd_hooks=sae_hooks + cache_hooks + inject_hooks,  # type: ignore
                     stop_at_layer=first_layer_to_not_run
                 )
 
@@ -290,7 +313,7 @@ class SAETransformer(nn.Module):
             input (Union[str, Int[torch.Tensor, "batch pos"])]): Either a batch of tokens ([batch,
                 pos]) or a text string (this will be converted to a batch of tokens with batch size
                 1).
-            sae_hook_names: (list[str]) The names of the hooks to run the SAEs on.
+            sae_positions: (list[str]) The names of the hooks to run the SAEs on.
             max_new_tokens (int): Maximum number of tokens to generate.
             stop_at_eos (bool): If True, stop generating tokens when the model outputs eos_token.
             eos_token_id (Optional[Union[int, Sequence]]): The token ID to use for end

@@ -99,7 +99,7 @@ class BaseAutoencoder(nn.Module):
             self, x: Float[Tensor, "batch ... model_act_sz"], x_reconstruct: Float[Tensor, "batch ... model_act_sz"],
             latent_acts: Float[Tensor, "batch ... n_latents"]) -> Float[Tensor, ""]:
         aux_loss = torch.tensor(0.0, device=x.device)
-        if self.config.ghost_grads_aux_coeff < 1e-8:
+        if self.config.ghost_grads_aux_coeff < 1e-8 or not self.training:
             return aux_loss
 
         residual: Float[Tensor, "batch ... model_act_sz"] = x - x_reconstruct

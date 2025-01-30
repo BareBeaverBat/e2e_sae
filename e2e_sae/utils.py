@@ -17,6 +17,7 @@ from torch import nn
 from torch.optim.lr_scheduler import LambdaLR
 from transformer_lens import HookedTransformer
 from transformer_lens.hook_points import HookPoint
+from wandb.apis.public import Run
 
 from e2e_sae.log import logger
 from e2e_sae.settings import REPO_ROOT
@@ -311,7 +312,7 @@ def get_cosine_schedule_with_warmup(
     return LambdaLR(optimizer, lr_lambda, last_epoch)
 
 
-def init_wandb(config: T, project: str, sweep_config_path: Path | str | None) -> T:
+def init_wandb(config: T, project: str) -> tuple[Run, T]:  #, sweep_config_path: Path | str | None) -> T:
     """Initialize Weights & Biases and return a config updated with sweep hyperparameters.
 
     If no sweep config is provided, the config is returned as is.
@@ -329,17 +330,17 @@ def init_wandb(config: T, project: str, sweep_config_path: Path | str | None) ->
     Returns:
         Config updated with sweep hyperparameters (if any).
     """
-    if sweep_config_path is not None:
-        with open(sweep_config_path) as f:
-            sweep_data = yaml.safe_load(f)
-        wandb.init(config=sweep_data, save_code=True)
-    else:
-        load_dotenv(override=True)
-        wandb.init(project=project, entity=os.getenv("WANDB_ENTITY"), save_code=True)
+    # if sweep_config_path is not None:
+    #     with open(sweep_config_path) as f:
+    #         sweep_data = yaml.safe_load(f)
+    #     wandb.init(config=sweep_data, save_code=True)
+    # else:
+    load_dotenv(override=True)
+    run = wandb.init(project=project, entity=os.getenv("WANDB_ENTITY"), save_code=True)
 
     # Update the config with the hyperparameters for this sweep (if any)
     config = replace_pydantic_model(config, wandb.config)
 
     # Update the non-frozen keys in the wandb config (only relevant for sweeps)
     wandb.config.update(config.model_dump(mode="json"))
-    return config
+    return run, config

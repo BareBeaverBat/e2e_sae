@@ -1,3 +1,5 @@
+from typing import cast
+
 import torch
 import torch.nn.functional as F
 import wandb
@@ -9,6 +11,7 @@ from transformer_lens.utils import lm_cross_entropy_loss
 
 from e2e_sae.data import DatasetConfig, create_data_loader
 from e2e_sae.hooks import CacheActs, SAEActs
+from e2e_sae.models.sae_impls import BaseAutoencoder
 from e2e_sae.models.transformers import SAETransformer
 
 
@@ -231,6 +234,7 @@ def collect_act_frequency_metrics(
     global_seed: int,
     device: torch.device,
     n_tokens: int,
+    sae_variant_idx: int
 ) -> dict[str, int | list[float]]:
     """Collect SAE activation frequency metrics for a SAETransformer model.
     Args:
@@ -240,6 +244,7 @@ def collect_act_frequency_metrics(
         global_seed: The global seed. Only matters when data_config.seed is None.
         device: The device to use.
         n_tokens: The number of tokens to use for calculating the frequency metrics.
+        sae_variant_idx: the index of the SAE variant (within the transformer) which metrics should be collected for
 
     Returns:
         A dictionary of the collected metrics (e.g. alive dictionary elements and their indices).
@@ -249,10 +254,9 @@ def collect_act_frequency_metrics(
 
     act_frequency_metrics = ActFrequencyMetrics(
         dict_sizes={
-            raw_pos: model.saes[all_pos].decoder.in_features
-            for raw_pos, all_pos in zip(
-                model.raw_sae_positions, model.all_sae_positions, strict=True
-            )
+            raw_pos: cast(BaseAutoencoder, model.saes[SAETransformer.sae_raw_pos_to_sae_key(raw_pos, sae_variant_idx)]
+                          ).config.dict_size
+            for raw_pos in model.raw_sae_positions
         },
         device=device,
     )
@@ -268,6 +272,8 @@ def collect_act_frequency_metrics(
             tokens=tokens,
             sae_positions=model.raw_sae_positions,
             cache_positions=None,
+            sae_variant_idx=sae_variant_idx,
+            should_run_to_logits=False
         )
         act_frequency_metrics.update_dict_el_frequencies(
             new_acts, batch_tokens=tokens.shape[0] * tokens.shape[1]
