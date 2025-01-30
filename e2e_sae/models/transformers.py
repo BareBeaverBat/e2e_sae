@@ -184,7 +184,7 @@ class SAETransformer(nn.Module):
                 in inject_positions_activations
             ]
 
-            block_num_pattern = re.compile(r"^block\.(\d+)\.")
+            block_num_pattern = re.compile(r"^blocks\.(\d+)\.")
 
             if should_run_to_logits:
                 model_inputs: Float[Tensor, "batch ... d_vocab"] | Float[Tensor, "batch ... model_act_sz"] = tokens

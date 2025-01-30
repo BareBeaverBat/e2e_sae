@@ -27,8 +27,11 @@ class SAESpecConfig(BaseModel):
         description="Multiplicative modifier on the size of the dictionary (relative to the baseline ratio of dict size"
                     " to SAE input size that's specified for all SAE's in the run)"
     )
-    top_k: Optional[PositiveInt]
+    top_k: PositiveInt | None = Field(
+        None, description="how many latents should be active per token (possibly on average across tokens in the batch)"
+    )
     matryoshka_group_proportions: list[PositiveFloat] | None = Field(
+        None,
         description="If is_matryoshka, list of fractions that add to 1 (describing the jumps between the sizes of the "
                     "nested groups of latents, as fractions of total number of latents in dictionary)"
     )
@@ -233,3 +236,21 @@ def distribute_to_integers(fractions: list[float], total: int) -> list[int]:
     return floored
 
 
+def get_run_name(config: Config) -> str:
+    """Generate a run name based on the config."""
+    if config.wandb_run_name:
+        run_suffix = config.wandb_run_name
+    else:
+        coeff_info = f"seed-{config.seed}_lpcoeff-{config.loss.sparsity.coeff}"
+        if config.loss.out_to_in is not None and config.loss.out_to_in.coeff > 0:
+            coeff_info += f"_in-to-out-{config.loss.out_to_in.coeff}"
+        if config.loss.logits_kl is not None and config.loss.logits_kl.coeff > 0:
+            coeff_info += f"_logits-kl-{config.loss.logits_kl.coeff}"
+        if config.loss.in_to_orig is not None and config.loss.in_to_orig.total_coeff > 0:
+            coeff_info += f"_in-to-orig-{config.loss.in_to_orig.total_coeff}"
+
+        run_suffix = (
+            f"{coeff_info}_lr-{config.lr}_ratio-{config.saes.dict_size_to_input_ratio}_"
+            f"{'-'.join(config.saes.sae_positions)}"
+        )
+    return config.wandb_run_name_prefix + run_suffix

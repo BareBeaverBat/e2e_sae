@@ -32,7 +32,7 @@ from e2e_sae.metrics import (
 from e2e_sae.models.sae_impls import BaseAutoencoder
 from e2e_sae.models.transformers import SAETransformer
 from e2e_sae.parallel_wandb import WandbWrapper, create_wandb_procs_queues_wrappers
-from e2e_sae.scripts.train_tlens_saes.tlens_sae_train_config import Config
+from e2e_sae.scripts.train_tlens_saes.tlens_sae_train_config import Config, get_run_name
 from e2e_sae.types import Samples
 from e2e_sae.utils import (
     filter_names,
@@ -43,26 +43,6 @@ from e2e_sae.utils import (
     save_module,
     set_seed,
 )
-
-
-def get_run_name(config: Config) -> str:
-    """Generate a run name based on the config."""
-    if config.wandb_run_name:
-        run_suffix = config.wandb_run_name
-    else:
-        coeff_info = f"seed-{config.seed}_lpcoeff-{config.loss.sparsity.coeff}"
-        if config.loss.out_to_in is not None and config.loss.out_to_in.coeff > 0:
-            coeff_info += f"_in-to-out-{config.loss.out_to_in.coeff}"
-        if config.loss.logits_kl is not None and config.loss.logits_kl.coeff > 0:
-            coeff_info += f"_logits-kl-{config.loss.logits_kl.coeff}"
-        if config.loss.in_to_orig is not None and config.loss.in_to_orig.total_coeff > 0:
-            coeff_info += f"_in-to-orig-{config.loss.in_to_orig.total_coeff}"
-
-        run_suffix = (
-            f"{coeff_info}_lr-{config.lr}_ratio-{config.saes.dict_size_to_input_ratio}_"
-            f"{'-'.join(config.saes.sae_positions)}"
-        )
-    return config.wandb_run_name_prefix + run_suffix
 
 
 @torch.inference_mode()

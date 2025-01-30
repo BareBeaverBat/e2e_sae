@@ -63,12 +63,12 @@ saes:
     # Matryoshka SAE's with e2e (and/or downstream-recon) loss should have less acute performance cost in later layers
     - blocks.8.hook_resid_pre
   dict_size_to_input_ratio: 4.0  # Size of the dictionary relative to the activations at the SAE positions
-  sae_types: # what types of SAE's to train and compare
+  sae_specs: # what types of SAE's to train and compare
     - type: BatchTopK
       is_matryoshka: true
       dict_size_modifier: 4.0
       top_k: 32
-      matryoshka_group_proportions: [ 0.125 0.375 0.5 ] # 1/8 3/8 1/2
+      matryoshka_group_proportions: [ 0.125, 0.375, 0.5 ] # 1/8, 3/8, 1/2
       aux_coeff: 0.03125 # 1/32
     - type: BatchTopK
       is_matryoshka: false

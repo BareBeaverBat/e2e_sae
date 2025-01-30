@@ -10,8 +10,7 @@ import wandb
 import yaml
 
 from e2e_sae.log import logger
-from e2e_sae.scripts.train_tlens_saes.run_train_tlens_saes import get_run_name
-from e2e_sae.scripts.train_tlens_saes.tlens_sae_train_config import Config
+from e2e_sae.scripts.train_tlens_saes.tlens_sae_train_config import Config, get_run_name
 from e2e_sae.utils import init_wandb
 
 wandb_save_flag = 'IS_CHECKPOINT'

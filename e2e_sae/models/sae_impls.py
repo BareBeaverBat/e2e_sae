@@ -86,8 +86,9 @@ class BaseAutoencoder(nn.Module):
 
     @torch.no_grad()
     def update_inactive_features(self, acts):
-        self.num_batches_not_active += (acts.sum(0) == 0).float()
-        self.num_batches_not_active[acts.sum(0) > 0] = 0
+        latent_activations_over_batch: Float[Tensor, "n_latents"] = acts.sum(dim=tuple(range(acts.ndim - 1)))
+        self.num_batches_not_active += (latent_activations_over_batch < 1e-8).float()
+        self.num_batches_not_active[latent_activations_over_batch > 1e-8] = 0
 
     def encode(self, x: Float[Tensor, "... model_act_sz"]) -> Float[Tensor, "... n_latents"]:
         raise NotImplementedError("Encode method must be implemented by subclasses")
@@ -222,7 +223,7 @@ class GlobalBatchTopKMatryoshkaSAE(BaseAutoencoder):
             start_idx = self.group_indices[i]
             end_idx = self.group_indices[i + 1]
             W_dec_slice = self.W_dec[start_idx:end_idx, :]
-            acts_topk = all_acts_topk[:, start_idx:end_idx]
+            acts_topk = all_acts_topk[..., start_idx:end_idx]
             x_reconstruct = acts_topk @ W_dec_slice + x_reconstruct
             post_processed_x_recon = self.postprocess_output(x_reconstruct, x_mean, x_std)
             intermediate_reconstructs.append(post_processed_x_recon)
