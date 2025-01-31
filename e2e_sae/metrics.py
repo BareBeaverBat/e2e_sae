@@ -9,6 +9,8 @@ from jaxtyping import Float, Int
 from torch import Tensor
 from tqdm import tqdm
 from transformer_lens.utils import lm_cross_entropy_loss
+from wandb import Histogram
+from wandb.plot import CustomChart
 
 from e2e_sae.data import DatasetConfig, create_data_loader
 from e2e_sae.hooks import CacheActs, SAEActs
@@ -95,7 +97,7 @@ class ActFrequencyMetrics:
 
     def collect_for_logging(
         self, log_wandb_histogram: bool = True, post_training: bool = False
-    ) -> dict[str, list[float] | int]:
+    ) -> dict[str, list[float] | int | Histogram | CustomChart]:
         """Collect the activation frequency metrics for logging.
 
         Currently collects:
@@ -133,8 +135,8 @@ class ActFrequencyMetrics:
             )
 
             if log_wandb_histogram:
-                data = [[s] for s in self.dict_el_frequencies[sae_pos]]
-                data_log = [[torch.log10(s + 1e-10)] for s in self.dict_el_frequencies[sae_pos]]
+                data = [[s.tolist()] for s in self.dict_el_frequencies[sae_pos]]
+                data_log = [[torch.log10(s + 1e-10).tolist()] for s in self.dict_el_frequencies[sae_pos]]
                 plot = wandb.plot.histogram(
                     wandb.Table(data=data, columns=["dict element activation frequency"]),
                     "dict element activation frequency",
@@ -153,12 +155,12 @@ class ActFrequencyMetrics:
                 log_dict[f"sparsity/dict_el_frequency_hist/log10/{sae_pos}"] = plot_log10
 
                 log_dict[f"sparsity/dict_el_frequency_hist/over_time/{sae_pos}"] = wandb.Histogram(
-                    self.dict_el_frequency_history[sae_pos]
+                    list(map(lambda x: x.tolist(), self.dict_el_frequency_history[sae_pos]))
                 )
                 log_dict[
                     f"sparsity/dict_el_frequency_hist/over_time/log10/{sae_pos}"
                 ] = wandb.Histogram(
-                    [torch.log10(s + 1e-10) for s in self.dict_el_frequency_history[sae_pos]]
+                    [torch.log10(s + 1e-10).tolist() for s in self.dict_el_frequency_history[sae_pos]]
                 )
         return log_dict
 
@@ -243,7 +245,7 @@ def collect_act_frequency_metrics(
     device: torch.device,
     n_tokens: int,
     sae_variant_idx: int
-) -> dict[str, int | list[float]]:
+) -> dict[str, int | list[float] | Histogram | CustomChart]:
     """Collect SAE activation frequency metrics for a SAETransformer model.
     Args:
         model: The SAETransformer model.
