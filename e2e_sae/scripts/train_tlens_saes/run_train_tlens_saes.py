@@ -31,7 +31,7 @@ from e2e_sae.metrics import (
     collect_act_frequency_metrics,
 )
 from e2e_sae.models.transformers import SAETransformer
-from e2e_sae.parallel_wandb import WandbWrapper, create_wandb_procs_queues_wrappers
+from e2e_sae.parallel_wandb import WandbWrapper, create_wandb_procs_queues_wrapper
 from e2e_sae.scripts.train_tlens_saes.tlens_sae_train_config import Config, get_run_name
 from e2e_sae.types import Samples
 from e2e_sae.utils import (
@@ -471,9 +471,9 @@ def train(
                         log_info.update(train_output_metrics)
 
                     if is_eval_step:
-                        # TODO investigate whether/how this evaluate step could be broken out of the for loop over SAE
-                        #  variants, so then evaluate() could share orig_acts (for a given batch of eval data) between
-                        #  the evaluations of the different SAE variants
+                        # TODO investigate breaking this evaluate step out of the for loop over SAE variants, so then
+                        #  evaluate() could share orig_acts (for a given batch of eval data) between the evaluations of
+                        #  the different SAE variants
                         eval_metrics = evaluate(
                             config=config, model=model, device=device, cache_positions=cache_positions,
                             sae_variant_idx=sae_spec_idx, vram_tracker=vram_tracker
@@ -520,8 +520,6 @@ def main(
     config = load_config(config_path_or_obj, config_model=Config)
 
     vram_tracker = GPUMemTracker(device, 0.05)
-    logger.debug(f"initial vram_tracker instance has id {id(vram_tracker)}; device={vram_tracker.device}, and "
-                 f"change threshold={vram_tracker.change_threshold}; actual device is {device}")
 
     base_run_name = get_run_name(config)
     run_name_suffixes = [f"_sae_variant_{sae_spec_idx}" for sae_spec_idx in range(len(config.saes.sae_specs))]
@@ -533,7 +531,7 @@ def main(
     wandb_wrapper: Optional[WandbWrapper] = None
 
     if config.wandb_project:
-        wandb_procs, wandb_log_queues, wandb_wrapper = create_wandb_procs_queues_wrappers(
+        wandb_procs, wandb_log_queues, wandb_wrapper = create_wandb_procs_queues_wrapper(
             config, base_run_name, run_name_suffixes)
 
     set_seed(config.seed)

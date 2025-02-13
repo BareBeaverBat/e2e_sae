@@ -220,7 +220,7 @@ class GlobalBatchTopKMatryoshkaSAE(BaseAutoencoder):
         # return tuple:
         # 0) the reconstruction
         # 1) the latent activations (after batch top k)
-        # 2) dict containing ? (e.g. the intermediate reconstructions)
+        # 2) frozen dataclass potentially containing misc other results (e.g. the intermediate reconstructions)
         x, x_mean, x_std = self.preprocess_input(x)
 
         x_cent = x - self.b_dec

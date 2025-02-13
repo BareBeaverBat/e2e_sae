@@ -47,9 +47,6 @@ class SAETransformer(nn.Module):
     ):
         super().__init__()
 
-        logger.debug(f"vram_tracker instance in SAETransformer.__init__() has id {id(vram_tracker)}; "
-                     f"device={vram_tracker.device}, and change threshold={vram_tracker.change_threshold};")
-
         self.tlens_model = tlens_model.eval()
         self.raw_sae_positions = raw_sae_positions
         self.hook_shapes: dict[str, list[int]] = get_hook_shapes(
@@ -145,8 +142,9 @@ class SAETransformer(nn.Module):
                 model's forward pass at those hooks' locations
 
         Returns:
-            - The logits of the SAE-augmented model. If should_run_thru_last_layer is true, this will be None
-                as the logits are not computed.
+            - The logits of the SAE-augmented model if should_run_thru_last_layer is true.
+                If it is false, this will be None if orig_acts was provided, and otherwise it will be the residual
+                stream activations of the model after the last SAE-hooked layer
             - The activations of the SAE-augmented model.
         """
         if should_run_to_logits is None:  # backwards compatibility

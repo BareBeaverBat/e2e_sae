@@ -111,8 +111,8 @@ class WandbWrapper:
         self.log_queues[sae_variant_idx].put(payload)
 
 
-def create_wandb_procs_queues_wrappers(config: Config, orig_base_run_name: str, run_name_suffixes: list[str]
-                                       ) -> tuple[list[mp.Process], list[mp.Queue], WandbWrapper]:
+def create_wandb_procs_queues_wrapper(config: Config, orig_base_run_name: str, run_name_suffixes: list[str]
+                                      ) -> tuple[list[mp.Process], list[mp.Queue], WandbWrapper]:
     project = config.wandb_project
     log_queues = [mp.Queue() for _ in range(len(config.saes.sae_specs))]
     wandb_procs = [mp.Process(
