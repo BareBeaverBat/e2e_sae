@@ -82,6 +82,6 @@ def inject_hook(
     Returns:
         The injected/replacement activations data
     """
-    hook_acts[cached_acts_key] = CacheActs(input=replacement_x)#TODO look more closely at this vs calc_loss function and whether this should instead be
+    hook_acts[cached_acts_key] = CacheActs(input=replacement_x)
     return replacement_x
 
