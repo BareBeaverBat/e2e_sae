@@ -121,7 +121,8 @@ class SAETransformer(nn.Module):
         sae_variant_idx: int = 0,
         should_run_to_logits: Optional[bool] = None,
         inject_positions_activations: Optional[dict[str, Float[Tensor, "batch pos dim"]]] = None
-    ) -> tuple[Float[torch.Tensor, "batch pos d_vocab"] | None, dict[str, SAEActs | CacheActs]]:
+    ) -> tuple[Float[torch.Tensor, "batch pos d_vocab"] | Float[torch.Tensor, "batch pos dim"] | None,
+               dict[str, SAEActs | CacheActs]]:
         """Forward pass through the SAE-augmented model.
 
         If `orig_acts` is not None, simply pass them through the SAEs. If None, run the entire
@@ -137,7 +138,8 @@ class SAETransformer(nn.Module):
                 the SAEs. If None, run the entire SAE-augmented model.
             sae_variant_idx: index of the SAE spec to use at each SAE position
             should_run_to_logits: whether the forward pass through the model should proceed past the layer of the
-                last SAE
+                last SAE; if None, this will effectively be True if orig_acts is None and False otherwise (for backwards
+                compatibility)
             inject_positions_activations: hook names and model activation tensors which should be injected into the
                 model's forward pass at those hooks' locations
 
